@@ -1,6 +1,6 @@
 # Cerebro RAG Lab
 
-A local RAG (Retrieval-Augmented Generation) lab for knowledge management with unified notes and documents, powered by FastAPI, React, PostgreSQL/pgvector, and Ollama.
+A local RAG (Retrieval-Augmented Generation) lab for knowledge management with unified notes and documents, powered by FastAPI, React 19, PostgreSQL/pgvector, and Ollama.
 
 ## Features
 
@@ -17,7 +17,7 @@ A local RAG (Retrieval-Augmented Generation) lab for knowledge management with u
 
 ```
 mi-rag-local/
-├── backend/                  # FastAPI application
+├── backend/                 # FastAPI application
 │   ├── main.py              # API endpoints, RAG logic, SSE streaming
 │   ├── database.py          # SQLAlchemy models
 │   ├── test_main.py         # Pytest tests

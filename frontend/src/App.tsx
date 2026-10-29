@@ -58,7 +58,7 @@ interface Message {
   thinking?: boolean;
 }
 
-type View = 'dashboard' | 'repository' | 'editor' | 'doc_detail';
+type View = 'dashboard' | 'repository' | 'doc_detail';
 
 const TYPE_ICONS: Record<string, { icon: React.ElementType; color: string }> = {
   note: { icon: FileText, color: 'text-emerald-400' },
@@ -72,11 +72,7 @@ export default function App() {
   const [tags, setTags] = useState<string[]>([]);
   const [aiOpen, setAiOpen] = useState(false);
 
-  const [noteTitle, setNoteTitle] = useState('');
-  const [noteContent, setNoteContent] = useState('');
   const [ingestLoading, setIngestLoading] = useState(false);
-  const [noteTags, setNoteTags] = useState<string[]>([]);
-  const [tagInput, setTagInput] = useState('');
 
   const [dataModalOpen, setDataModalOpen] = useState(false);
   const [dataMode, setDataMode] = useState<'note' | 'document'>('note');
@@ -174,39 +170,6 @@ export default function App() {
       chatScrollRef.current.scrollTop = chatScrollRef.current.scrollHeight;
     }
   }, [messages]);
-
-  // --- Ingest ---
-  const saveNoteOrDoc = async (title: string, textContent: string, itemType: 'note' | 'document', itemTags: string[] = []) => {
-    if (!title.trim() || !textContent.trim()) return;
-    setIngestLoading(true);
-    try {
-      const res = await fetch(`${API_BASE}/ingest`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          filename: title.endsWith('.txt') || title.endsWith('.md') ? title : `${title}.md`,
-          text: textContent,
-          type: itemType,
-          tags: itemTags
-        })
-      });
-      const data = await res.json();
-      if (res.ok) {
-        alert(`${itemType === 'note' ? 'Nota guardada' : 'Documento cargado'} e indexado (${data.chunks} fragmentos).`);
-        if (itemType === 'note') { setNoteTitle(''); setNoteContent(''); }
-        else { setDocTitle(''); setDocContent(''); }
-        fetchItems();
-        fetchDocuments();
-        setCurrentView('dashboard');
-      } else {
-        alert(`Error: ${data.detail || 'Unknown error'}`);
-      }
-    } catch {
-      alert("Error al conectar con el backend.");
-    } finally {
-      setIngestLoading(false);
-    }
-  };
 
   // --- Modal "Nueva Data" ---
   const handleDataSubmit = async () => {
@@ -647,53 +610,6 @@ export default function App() {
           </div>
         );
 
-      case 'editor':
-        return (
-          <div className="max-w-3xl flex-1 flex flex-col space-y-4">
-            <Input
-              type="text"
-              placeholder="Título de la nota..."
-              value={noteTitle}
-              onChange={e => setNoteTitle(e.target.value)}
-              className="text-xl font-bold bg-transparent border-b border-slate-800 rounded-none focus:ring-0 focus:border-indigo-500"
-            />
-            <div className="flex flex-wrap gap-1">
-              {noteTags.map((tag, idx) => (
-                <Badge key={idx} variant="secondary" className="text-xs">
-                  #{tag} <X size={10} className="ml-1 cursor-pointer" onClick={() => setNoteTags(noteTags.filter((_, i) => i !== idx))} />
-                </Badge>
-              ))}
-              <Input
-                placeholder="+ Agregar tag..."
-                value={tagInput}
-                onChange={e => setTagInput(e.target.value)}
-                onKeyPress={e => {
-                  if (e.key === 'Enter' && tagInput.trim() && !noteTags.includes(tagInput.trim())) {
-                    setNoteTags([...noteTags, tagInput.trim()]);
-                    setTagInput('');
-                  }
-                }}
-                className="w-36 text-xs h-6"
-              />
-            </div>
-            <Textarea
-              placeholder="Empieza a escribir tu conocimiento aquí..."
-              value={noteContent}
-              onChange={e => setNoteContent(e.target.value)}
-              className="flex-1 min-h-[300px]"
-            />
-            <Button
-              onClick={() => saveNoteOrDoc(noteTitle, noteContent, 'note', noteTags)}
-              disabled={ingestLoading}
-              variant="default"
-              className="w-fit ml-auto bg-emerald-600 hover:bg-emerald-500 text-white"
-            >
-              {ingestLoading ? <Loader2 size={14} className="animate-spin" /> : <CheckCircle2 size={14} />}
-              Guardar e Indexar Nota
-             </Button>
-          </div>
-        );
-
       case 'doc_detail':
         if (!activeDoc) {
           setCurrentView('repository');
@@ -759,24 +675,12 @@ export default function App() {
                 />
                 <span className="text-xs">{activeDoc.rag_enabled ? 'RAG activado' : 'RAG desactivado'}</span>
               </div>
-             </div>
-
-
-            <Textarea
-              placeholder="Contenido del documento..."
-              value={docContent}
-              onChange={e => setDocContent(e.target.value)}
-              className="flex-1 min-h-[400px]"
-            />
+               </div>
 
             <div className="flex justify-between items-center">
-              <Button variant="outline" size="sm" className="text-xs">
-                Exportar como PDF
-              </Button>
               <Button
                 onClick={async () => {
                   await updateDocTags(activeDoc.filename, activeDoc.tags || []);
-                  setDocContent('');
                   fetchDocuments();
                   setCurrentView('repository');
                 }}
@@ -789,26 +693,7 @@ export default function App() {
             </div>
           </div>
         );
-
-      default:
-        return (
-          <div className="max-w-3xl flex-1 flex flex-col space-y-4">
-            <Input
-              type="text"
-              placeholder="Título de la nota..."
-              value={noteTitle}
-              onChange={e => setNoteTitle(e.target.value)}
-              className="text-xl font-bold bg-transparent border-b border-slate-800 rounded-none focus:ring-0 focus:border-indigo-500"
-            />
-            <Textarea
-              placeholder="Empieza a escribir tu conocimiento aquí..."
-              value={noteContent}
-              onChange={e => setNoteContent(e.target.value)}
-              className="flex-1 min-h-[300px]"
-            />
-          </div>
-        );
-    }
+      }
   };
 
   return (

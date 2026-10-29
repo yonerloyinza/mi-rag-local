@@ -1,6 +1,7 @@
 import json
 import os
 import re
+import hashlib
 import requests
 from fastapi import FastAPI, Depends, HTTPException, status, Query, UploadFile, File, Form
 from fastapi.middleware.cors import CORSMiddleware
@@ -42,6 +43,24 @@ class SearchRequest(BaseModel):
 OLLAMA_URL = "http://localhost:11434/api/embeddings"
 OLLAMA_GENERATE_URL = "http://localhost:11434/api/generate"
 
+_embedding_cache: dict = {}
+
+def get_ollama_embedding(text_chunk: str) -> list[float]:
+    cache_key = hashlib.md5(text_chunk.encode()).hexdigest()
+    if cache_key in _embedding_cache:
+        return _embedding_cache[cache_key]
+    try:
+        response = requests.post(
+            OLLAMA_URL,
+            json={"model": "nomic-embed-text", "prompt": text_chunk}
+        )
+        response.raise_for_status()
+        embedding = response.json()["embedding"]
+        _embedding_cache[cache_key] = embedding
+        return embedding
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Error en Ollama Embeddings: {str(e)}")
+
 def chunk_text(text_str: str, chunk_size: int = 400, overlap: int = 80) -> list[str]:
     chunks = []
     start = 0
@@ -51,17 +70,6 @@ def chunk_text(text_str: str, chunk_size: int = 400, overlap: int = 80) -> list[
         chunks.append(text_str[start:end])
         start += (chunk_size - overlap)
     return chunks
-
-def get_ollama_embedding(text_chunk: str) -> list[float]:
-    try:
-        response = requests.post(
-            OLLAMA_URL,
-            json={"model": "nomic-embed-text", "prompt": text_chunk}
-        )
-        response.raise_for_status()
-        return response.json()["embedding"]
-    except Exception as e:
-        raise HTTPException(status_code=502, detail=f"Error en Ollama Embeddings: {str(e)}")
 
 def condense_query(history_context: str, current_question: str) -> str:
     if not history_context:
@@ -85,6 +93,48 @@ def condense_query(history_context: str, current_question: str) -> str:
         return query_condensada if query_condensada else current_question
     except Exception:
         return current_question
+
+def _process_text(db: Session, filename: str, text_content: str, doc_type: str = "note", tags: list[str] = None) -> int:
+    if tags is None:
+        tags = []
+    if not text_content.strip():
+        raise HTTPException(status_code=400, detail="El texto no puede estar vacío.")
+
+    db.query(DocumentChunk).filter(DocumentChunk.filename == filename).delete()
+
+    chunks = chunk_text(text_content)
+    for chunk in chunks:
+        vector = get_ollama_embedding(chunk)
+        db_chunk = DocumentChunk(
+            filename=filename,
+            content=chunk,
+            embedding=vector,
+            type=doc_type,
+            tags=tags,
+            rag_enabled=True
+        )
+        db.add(db_chunk)
+    db.commit()
+
+    db.execute(text(
+        "UPDATE document_chunks SET search_vector = to_tsvector('pg_catalog.spanish', content) WHERE filename = :f"
+    ).params(f=filename))
+    db.commit()
+    return len(chunks)
+
+def _run_eval_async(db, question, context, answer, session_id):
+    import threading
+    def _run():
+        score = evaluate_rag(context, question, answer)
+        db_session = SessionLocal()
+        try:
+            hist = db_session.query(ChatHistory).filter(ChatHistory.session_id == session_id).order_by(ChatHistory.id.desc()).first()
+            if hist:
+                hist.eval_score = score
+                db_session.commit()
+        finally:
+            db_session.close()
+    threading.Thread(target=_run, daemon=True).start()
 
 def evaluate_rag(context: str, question: str, answer: str) -> dict:
     eval_prompt = (
@@ -172,31 +222,8 @@ def list_knowledge_items(db: Session = Depends(get_db)):
 
 @app.post("/api/ingest")
 def ingest_item(payload: IngestRequest, db: Session = Depends(get_db)):
-    if not payload.text.strip():
-        raise HTTPException(status_code=400, detail="El texto no puede estar vacío.")
-
-    db.query(DocumentChunk).filter(DocumentChunk.filename == payload.filename).delete()
-
-    chunks = chunk_text(payload.text)
-    for chunk in chunks:
-        vector = get_ollama_embedding(chunk)
-        db_chunk = DocumentChunk(
-            filename=payload.filename,
-            content=chunk,
-            embedding=vector,
-            type=payload.type,
-            tags=payload.tags,
-            rag_enabled=True
-        )
-        db.add(db_chunk)
-    db.commit()
-
-    db.execute(text(
-        "UPDATE document_chunks SET search_vector = to_tsvector('pg_catalog.spanish', content) WHERE filename = :f"
-    ).params(f=payload.filename))
-    db.commit()
-
-    return {"status": "success", "message": f"'{payload.filename}' guardado e indexado.", "chunks": len(chunks)}
+    _process_text(db, payload.filename, payload.text, payload.type, payload.tags)
+    return {"status": "success", "message": f"'{payload.filename}' guardado e indexado.", "chunks": len(chunk_text(payload.text))}
 
 @app.delete("/api/documents/{filename}")
 def delete_document(filename: str, db: Session = Depends(get_db)):
@@ -230,7 +257,6 @@ def ingest_file(
 ):
     import PyPDF2
     import io
-    import re
     import pytesseract
     from PIL import Image
 
@@ -269,28 +295,8 @@ def ingest_file(
 
     tag_list = [t.strip() for t in tags.split(',') if t.strip()] if tags else []
 
-    db.query(DocumentChunk).filter(DocumentChunk.filename == filename).delete()
-
-    chunks = chunk_text(text_content)
-    for chunk in chunks:
-        vector = get_ollama_embedding(chunk)
-        db_chunk = DocumentChunk(
-            filename=filename,
-            content=chunk,
-            embedding=vector,
-            type=item_type,
-            tags=tag_list,
-            rag_enabled=True
-        )
-        db.add(db_chunk)
-    db.commit()
-
-    db.execute(text(
-        "UPDATE document_chunks SET search_vector = to_tsvector('pg_catalog.spanish', content) WHERE filename = :f"
-    ).params(f=filename))
-    db.commit()
-
-    return {"status": "success", "message": f"'{filename}' guardado e indexado.", "chunks": len(chunks)}
+    chunk_count = _process_text(db, filename, text_content, item_type, tag_list)
+    return {"status": "success", "message": f"'{filename}' guardado e indexado.", "chunks": chunk_count}
 
 @app.get("/api/tags")
 def list_tags(db: Session = Depends(get_db)):
@@ -493,8 +499,8 @@ def query_rag(payload: QueryRequest, db: Session = Depends(get_db)):
             finally:
                 db_session.close()
 
-            evaluation = evaluate_rag(context=context_text, question=payload.question, answer=saved_answer)
-            yield f"event: evaluation\ndata: {json.dumps(evaluation)}\n\n"
+            _run_eval_async(db, payload.question, context_text, saved_answer, payload.session_id)
+            yield f"event: evaluation_done\ndata: {{\"status\": \"queued\"}}\n\n"
 
         except Exception as e:
             yield f"event: error\ndata: {json.dumps({'detail': str(e)})}\n\n"

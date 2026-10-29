@@ -1,6 +1,6 @@
 import os
 from dotenv import load_dotenv
-from sqlalchemy import create_engine, Column, Integer, String, Text, DateTime, Boolean, func, event, ForeignKey
+from sqlalchemy import create_engine, Column, Integer, String, Text, DateTime, Boolean, func, event, ForeignKey, JSON
 from sqlalchemy.orm import declarative_base, sessionmaker, relationship
 from sqlalchemy.dialects.postgresql import TSVECTOR, ARRAY
 from pgvector.sqlalchemy import Vector
@@ -40,6 +40,7 @@ class ChatHistory(Base):
     session_id = Column(String, nullable=False, index=True)
     role = Column(String, nullable=False)
     content = Column(Text, nullable=False)
+    eval_score = Column(JSON, nullable=True)
     created_at = Column(DateTime, server_default=func.now())
 
 def get_db():
