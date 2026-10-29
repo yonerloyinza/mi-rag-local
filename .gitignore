@@ -47,3 +47,7 @@ test-results/
 playwright-report/
 playwright/.cache/
 frontend.tar.gz
+
+# APP
+uploads
+vault

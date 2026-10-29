@@ -1,10 +1,10 @@
 import React, { useState, useEffect, useRef, useLayoutEffect } from 'react';
 import {
-  Folder, FileText, Bot, User, Loader2, CheckCircle2, Plus,
-  Sparkles, Send, Layers, NotebookTabs, Trash2, MessageSquare,
-   Search, Tags, ChevronLeft, Edit3, MoreVertical,
-   Calendar, Hash, X, FileDown
-} from 'lucide-react';
+   Folder, FileText, Database, Bot, User, Loader2, CheckCircle2, Plus,
+   Sparkles, Send, Layers, NotebookTabs, Trash2, MessageSquare,
+    Search, Tags, ChevronLeft, Edit3, MoreVertical,
+    Calendar, Hash, X, FileDown
+ } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Textarea } from '@/components/ui/textarea';
@@ -26,13 +26,20 @@ interface KnowledgeItem {
 }
 
 interface DocumentDetail {
+  id?: number;
   filename: string;
   type: 'note' | 'document';
+  file_path?: string;
   tags: string[];
   rag_enabled: boolean;
   chunks_count: number;
   created_at: string | null;
   updated_at: string | null;
+}
+
+interface DocumentContent {
+  filename: string;
+  content: string;
 }
 
 interface SourceInfo {
@@ -60,13 +67,60 @@ interface Message {
 
 type View = 'dashboard' | 'repository' | 'doc_detail';
 
-const TYPE_ICONS: Record<string, { icon: React.ElementType; color: string }> = {
-  note: { icon: FileText, color: 'text-emerald-400' },
-  document: { icon: Folder, color: 'text-amber-400' },
+const RiSvg = ({ d, className = 'w-5 h-5' }: { d: string; className?: string }) => (
+  <svg viewBox="0 0 24 24" fill="currentColor" xmlns="http://www.w3.org/2000/svg" className={className}><path d={d}/></svg>
+);
+const RiFilePdf     = ({ className }: { className?: string }) => <RiSvg d="M12 16H8V8H12C14.2091 8 16 9.79086 16 12C16 14.2091 14.2091 16 12 16ZM10 10V14H12C13.1046 14 14 13.1046 14 12C14 10.8954 13.1046 10 12 10H10ZM15 4H5V20H19V8H15V4ZM3 2.9918C3 2.44405 3.44749 2 3.9985 2H16L20.9997 7L21 20.9925C21 21.5489 20.5551 22 20.0066 22H3.9934C3.44476 22 3 21.5447 3 21.0082V2.9918Z" className={className} />;
+const RiFileText    = ({ className }: { className?: string }) => <RiSvg d="M21 8V20.9932C21 21.5501 20.5552 22 20.0066 22H3.9934C3.44495 22 3 21.556 3 21.0082V2.9918C3 2.45531 3.4487 2 4.00221 2H14.9968L21 8ZM19 9H14V4H5V20H19V9ZM8 7H11V9H8V7ZM8 11H16V13H8V11ZM8 15H16V17H8V15Z" className={className} />;
+const RiMarkdown     = ({ className }: { className?: string }) => <RiSvg d="M3 3H21C21.5523 3 22 3.44772 22 4V20C22 20.5523 21.5523 21 21 21H3C2.44772 21 2 20.5523 2 20V4C2 3.44772 2.44772 3 3 3ZM4 5V19H20V5H4ZM7 15.5H5V8.5H7L9 10.5L11 8.5H13V15.5H11V11.5L9 13.5L7 11.5V15.5ZM18 12.5H20L17 15.5L14 12.5H16V8.5H18V12.5Z" className={className} />;
+const RiFileCode     = ({ className }: { className?: string }) => <RiSvg d="M15 4H5V20H19V8H15V4ZM3 2.9918C3 2.44405 3.44749 2 3.9985 2H16L20.9997 7L21 20.9925C21 21.5489 20.5551 22 20.0066 22H3.9934C3.44476 22 3 21.5447 3 21.0082V2.9918ZM17.6569 12L14.1213 15.5355L12.7071 14.1213L14.8284 12L12.7071 9.87868L14.1213 8.46447L17.6569 12ZM6.34315 12L9.87868 8.46447L11.2929 9.87868L9.17157 12L11.2929 14.1213L9.87868 15.5355L6.34315 12Z" className={className} />;
+const RiFileExcel    = ({ className }: { className?: string }) => <RiSvg d="M13.2 12L16 16H13.6L12 13.7143L10.4 16H8L10.8 12L8 8H10.4L12 10.2857L13.6 8H15V4H5V20H19V8H16L13.2 12ZM3 2.9918C3 2.44405 3.44749 2 3.9985 2H16L20.9997 7L21 20.9925C21 21.5489 20.5551 22 20.0066 22H3.9934C3.44476 22 3 21.5447 3 21.0082V2.9918Z" className={className} />;
+const RiFileImage    = ({ className }: { className?: string }) => <RiSvg d="M15 8V4H5V20H19V8H15ZM3 2.9918C3 2.44405 3.44749 2 3.9985 2H16L20.9997 7L21 20.9925C21 21.5489 20.5551 22 20.0066 22H3.9934C3.44476 22 3 21.5447 3 21.0082V2.9918ZM11 9.5C11 10.3284 10.3284 11 9.5 11C8.67157 11 8 10.3284 8 9.5C8 8.67157 8.67157 8 9.5 8C10.3284 8 11 8.67157 11 9.5ZM17.5 17L13.5 10L8 17H17.5Z" className={className} />;
+const RiFileWord     = ({ className }: { className?: string }) => <RiSvg d="M16 8V16H14L12 14L10 16H8V8H10V13L12 11L14 13V8H15V4H5V20H19V8H16ZM3 2.9918C3 2.44405 3.44749 2 3.9985 2H16L20.9997 7L21 20.9925C21 21.5489 20.5551 22 20.0066 22H3.9934C3.44476 22 3 21.5447 3 21.0082V2.9918Z" className={className} />;
+const RiFileZip      = ({ className }: { className?: string }) => <RiSvg d="M20 22H4C3.44772 22 3 21.5523 3 21V3C3 2.44772 3.44772 2 4 2H20C20.5523 2 21 2.44772 21 3V21C21 21.5523 20.5523 22 20 22ZM19 20V4H5V20H19ZM14 12V17H10V14H12V12H14ZM12 4H14V6H12V4ZM10 6H12V8H10V6ZM12 8H14V10H12V8ZM10 10H12V12H10V10Z" className={className} />;
+const RiFileLine     = ({ className }: { className?: string }) => <RiSvg d="M21 8V20.9932C21 21.5501 20.5552 22 20.0066 22H3.9934C3.44495 22 3 21.556 3 21.0082V2.9918C3 2.45531 3.4487 2 4.00221 2H14.9968L21 8ZM19 9H14V4H5V20H19V9Z" className={className} />;
+
+const TYPE_COLORS: Record<string, string> = {
+  note: 'text-emerald-400',
+  document: 'text-amber-400',
+};
+
+const EXT_ICONS: Record<string, { icon: React.ElementType; color: string }> = {
+  pdf:  { icon: RiFilePdf,     color: 'text-red-400' },
+  txt:  { icon: RiFileText,   color: 'text-slate-300' },
+  md:   { icon: RiMarkdown,    color: 'text-emerald-400' },
+  csv:  { icon: RiFileExcel,  color: 'text-amber-400' },
+  json: { icon: RiFileCode,   color: 'text-purple-400' },
+  html: { icon: RiFileCode,   color: 'text-orange-400' },
+  htm:  { icon: RiFileCode,   color: 'text-orange-400' },
+  js:   { icon: RiFileCode,   color: 'text-purple-400' },
+  ts:   { icon: RiFileCode,   color: 'text-purple-400' },
+  jpg:  { icon: RiFileImage,  color: 'text-blue-400' },
+  jpeg: { icon: RiFileImage,  color: 'text-blue-400' },
+  png:  { icon: RiFileImage,  color: 'text-blue-400' },
+  gif:  { icon: RiFileImage,  color: 'text-blue-400' },
+  webp: { icon: RiFileImage,  color: 'text-blue-400' },
+  doc:  { icon: RiFileWord,   color: 'text-blue-500' },
+  docx: { icon: RiFileWord,   color: 'text-blue-500' },
+  xlsx: { icon: RiFileExcel,  color: 'text-amber-400' },
+  zip:  { icon: RiFileZip,    color: 'text-orange-400' },
+};
+
+const getDisplayFilename = (filename: string): string => {
+  const lastDot = filename.lastIndexOf('.');
+  if (lastDot > 0) return filename.slice(0, lastDot);
+  return filename;
+};
+
+const getDocIcon = (filename: string, docType: string): { icon: React.ElementType; color: string } => {
+  if (docType === 'note') return { icon: RiMarkdown, color: 'text-emerald-400' };
+  const ext = filename.split('.').pop()?.toLowerCase();
+  if (ext && EXT_ICONS[ext]) return EXT_ICONS[ext];
+  return { icon: RiFileLine, color: 'text-slate-400' };
 };
 
 export default function App() {
-  const [currentView, setCurrentView] = useState<View>('dashboard');
+  const [currentView, setCurrentViewState] = useState<View>('dashboard');
   const [items, setItems] = useState<KnowledgeItem[]>([]);
   const [documents, setDocuments] = useState<DocumentDetail[]>([]);
   const [tags, setTags] = useState<string[]>([]);
@@ -89,6 +143,8 @@ export default function App() {
   const [searchResults, setSearchResults] = useState<any[]>([]);
 
   const [activeDoc, setActiveDoc] = useState<DocumentDetail | null>(null);
+  const [docContent, setDocContent] = useState('');
+  const [docLoading, setDocLoading] = useState(false);
   const [docTagsInput, setDocTagsInput] = useState('');
 
   const [question, setQuestion] = useState('');
@@ -101,6 +157,22 @@ export default function App() {
 
   const chatInputRef = useRef<HTMLTextAreaElement>(null);
   const chatScrollRef = useRef<HTMLDivElement>(null);
+
+  // --- View + URL sync ---
+  const setView = (view: View, filename?: string) => {
+    setCurrentViewState(view);
+    let path = '/';
+    if (view === 'repository') path = '/repository';
+    if (view === 'doc_detail' && filename) {
+      path = `/document/${encodeURIComponent(filename)}`;
+    }
+    window.history.pushState({ view, filename }, '', path);
+  };
+
+  const handleViewChange = (view: View) => {
+    if (view === 'dashboard') { setView('dashboard'); return; }
+    setView(view);
+  };
 
   // --- Data fetching ---
   const fetchItems = async () => {
@@ -117,7 +189,11 @@ export default function App() {
       const res = await fetch(`${API_BASE}/documents`);
       if (res.ok) {
         const data = await res.json();
-        setDocuments(data.documents || []);
+        const uniqueDocs = (data.documents || []).filter(
+          (doc: any, idx: number, arr: any[]) =>
+            arr.findIndex((d: any) => d.filename === doc.filename) === idx
+        );
+        setDocuments(uniqueDocs);
         const allTags = new Set<string>();
         data.documents?.forEach((doc: any) => {
           doc.tags?.forEach((t: string) => allTags.add(t));
@@ -129,6 +205,21 @@ export default function App() {
     }
   };
 
+  const fetchDocContent = async (filename: string) => {
+    setDocLoading(true);
+    try {
+      const res = await fetch(`${API_BASE}/documents/${encodeURIComponent(filename)}/content`);
+      if (res.ok) {
+        const data = await res.json() as DocumentContent;
+        setDocContent(data.content);
+      }
+    } catch {
+      console.error("Error loading content");
+    } finally {
+      setDocLoading(false);
+    }
+  };
+
   const checkDbHealth = async () => {
     try {
       const res = await fetch(`${API_BASE}/health`);
@@ -137,12 +228,55 @@ export default function App() {
       setDbConnected(false);
     }
   };
+  useEffect(() => {
+    const handlePopState = () => {
+      const path = window.location.pathname;
+      if (path.startsWith('/document/')) {
+        const filename = decodeURIComponent(path.slice(10));
+        const doc = documents.find(d => d.filename === filename);
+        if (doc) {
+          setActiveDoc(doc as any);
+          fetchDocContent(filename);
+          setCurrentViewState('doc_detail');
+        } else {
+          setView('repository');
+        }
+      } else if (path === '/repository') {
+        setView('repository');
+      } else {
+        setView('dashboard');
+      }
+    };
+    window.addEventListener('popstate', handlePopState);
+    return () => window.removeEventListener('popstate', handlePopState);
+  }, [documents]);
 
   useEffect(() => {
     fetchItems();
     fetchDocuments();
     checkDbHealth();
   }, []);
+
+  useEffect(() => {
+    const path = window.location.pathname;
+    if (path.startsWith('/document/')) {
+      const filename = decodeURIComponent(path.slice(10));
+      const doc = documents.find(d => d.filename === filename);
+      if (doc) {
+        setActiveDoc(doc as any);
+        fetchDocContent(filename);
+        setCurrentViewState('doc_detail');
+        return;
+      }
+    }
+    if (path === '/repository') {
+      setView('repository');
+      return;
+    }
+    if (path === '/') {
+      window.history.replaceState({ view: 'dashboard' }, '', '/');
+    }
+  }, [documents, items]);
 
   useEffect(() => {
     if (aiOpen) {
@@ -188,7 +322,7 @@ export default function App() {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
-            filename: dataTitle.endsWith('.txt') || dataTitle.endsWith('.md') ? dataTitle : `${dataTitle}.md`,
+            filename: dataTitle.endsWith('.md') ? dataTitle : `${dataTitle.replace(/\.txt$/, '')}.md`,
             text: dataContent,
             type: 'note',
             tags: dataTags
@@ -233,7 +367,7 @@ export default function App() {
       setDataFile(null);
       fetchItems();
       fetchDocuments();
-      setCurrentView('dashboard');
+      setView('dashboard');
     } catch {
       alert("Error al conectar con el backend.");
     } finally {
@@ -257,7 +391,7 @@ export default function App() {
       fetchDocuments();
       if (activeDoc?.filename === filename) {
         setActiveDoc(null);
-        setCurrentView('repository');
+        setView('repository');
       }
     } catch (e) {
       console.error("Error deleting document:", e);
@@ -404,33 +538,39 @@ export default function App() {
 
             <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
               <Card className="bg-slate-900 border-slate-800">
-                <CardContent className="pt-5">
-                  <span className="text-xs text-slate-400 font-medium">Total Documentos</span>
-                  <div className="text-3xl font-black text-white mt-2">{documents.length}</div>
-                </CardContent>
-              </Card>
-              <Card className="bg-slate-900 border-slate-800">
-                <CardContent className="pt-5">
-                  <span className="text-xs text-slate-400 font-medium">Chunks Vectoriales</span>
-                  <div className="text-3xl font-black text-white mt-2">
-                    {documents.reduce((sum, d) => sum + (d.chunks_count || 0), 0)}
+                <CardContent className="pt-5 flex items-center gap-4">
+                  <Folder size={32} className="text-indigo-400" />
+                  <div>
+                    <span className="text-xs text-slate-400 font-medium">Total Documentos</span>
+                    <div className="text-3xl font-black text-white mt-1">{documents.length}</div>
                   </div>
                 </CardContent>
               </Card>
               <Card className="bg-slate-900 border-slate-800">
-                <CardContent className="pt-5">
-                  <span className="text-xs text-slate-400 font-medium">Estado Conexión DB</span>
-                  <div className="flex items-center mt-2">
-                    {dbConnected === null ? (
-                      <Loader2 size={20} className="animate-spin text-slate-500" />
-                    ) : (
-                      <>
-                        <div className={`w-2 h-2 rounded-full mr-2 ${dbConnected ? 'bg-emerald-400' : 'bg-red-400'}`} />
-                        <span className={`text-xs font-medium ${dbConnected ? 'text-emerald-400' : 'text-red-400'}`}>
+                <CardContent className="pt-5 flex items-center gap-4">
+                  <Layers size={32} className="text-amber-400" />
+                  <div>
+                    <span className="text-xs text-slate-400 font-medium">Chunks Vectoriales</span>
+                    <div className="text-3xl font-black text-white mt-1">
+                      {documents.reduce((sum, d) => sum + (d.chunks_count || 0), 0)}
+                    </div>
+                  </div>
+                </CardContent>
+              </Card>
+              <Card className="bg-slate-900 border-slate-800">
+                <CardContent className="pt-5 flex items-center gap-4">
+                  <Database size={32} className={dbConnected ? 'text-emerald-400' : 'text-red-400'} />
+                  <div>
+                    <span className="text-xs text-slate-400 font-medium">Estado Conexión DB</span>
+                    <div className="flex items-center mt-1">
+                      {dbConnected === null ? (
+                        <Loader2 size={20} className="animate-spin text-slate-500" />
+                      ) : (
+                        <span className={`text-sm font-medium ${dbConnected ? 'text-emerald-400' : 'text-red-400'}`}>
                           {dbConnected ? 'Conectado' : 'Desconectado'}
                         </span>
-                      </>
-                    )}
+                      )}
+                    </div>
                   </div>
                 </CardContent>
               </Card>
@@ -454,17 +594,17 @@ export default function App() {
                 <h3 className="text-sm font-bold text-slate-300">Acceso Rápido Reciente</h3>
                 <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
                   {documents.slice(0, 4).map(doc => {
-                    const Icon = TYPE_ICONS[doc.type]?.icon || FileText;
+                    const { icon: Icon, color: iconColor } = getDocIcon(doc.filename, doc.type);
                     return (
                       <Card
                         key={doc.filename}
                         className="bg-slate-900 border-slate-800 cursor-pointer hover:border-indigo-500 transition-colors"
-                        onClick={() => { setActiveDoc(doc as any); fetchLinks(doc.filename); setCurrentView('doc_detail'); }}
+                        onClick={() => { setActiveDoc(doc as any); fetchDocContent(doc.filename); setView('doc_detail', doc.filename); }}
                       >
                         <CardContent className="pt-3">
                           <div className="flex items-center gap-2">
-                            <Icon size={16} className={TYPE_ICONS[doc.type]?.color || 'text-slate-400'} />
-                            <span className="text-xs font-medium text-slate-300 truncate">{doc.filename}</span>
+                            <Icon className={`w-5 h-5 ${iconColor}`} />
+                            <span className="text-xs font-medium text-slate-300 truncate">{getDisplayFilename(doc.filename)}</span>
                           </div>
                           <div className="text-[10px] text-slate-500 mt-1">
                             {doc.chunks_count} chunks
@@ -483,7 +623,7 @@ export default function App() {
         return (
           <div className="max-w-5xl flex-1 flex flex-col space-y-5">
             <div>
-              <h2 className="text-2xl font-black text-white">Invernadero de Datos</h2>
+              <h2 className="text-2xl font-black text-white">Activos de Información</h2>
               <p className="text-xs text-slate-400 mt-1">Tu repositorio de conocimiento indexado.</p>
             </div>
 
@@ -544,23 +684,27 @@ export default function App() {
 
             <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
               {(searchResults.length > 0 ? searchResults : documents).map(doc => {
-                const Icon = TYPE_ICONS[doc.type]?.icon || FileText;
+                const { icon: Icon, color: iconColor } = getDocIcon(doc.filename, doc.type);
                 return (
-                  <Card key={doc.filename} className="bg-slate-900 border-slate-800 hover:border-indigo-500 transition-all">
+                  <Card
+                    key={doc.filename}
+                    className="bg-slate-900 border-slate-800 hover:border-indigo-500 transition-all cursor-pointer"
+                    onClick={() => { setActiveDoc(doc as any); fetchDocContent(doc.filename); setView('doc_detail', doc.filename); }}
+                  >
                     <CardContent className="p-4 space-y-2">
                       <div className="flex items-start justify-between">
                         <div className="flex items-center gap-2 min-w-0">
-                          <Icon size={16} className={TYPE_ICONS[doc.type]?.color || 'text-slate-400'} />
-                          <span className="font-medium text-sm text-white truncate">{doc.filename}</span>
+                            <Icon className={`w-5 h-5 ${iconColor}`} />
+                            <span className="font-medium text-sm text-white truncate">{getDisplayFilename(doc.filename)}</span>
                         </div>
                         <DropdownMenu>
                           <DropdownMenuTrigger asChild>
-                            <Button variant="ghost" size="sm" className="h-5 w-5 p-0">
+                            <Button variant="ghost" size="sm" className="h-5 w-5 p-0" onClick={(e) => e.stopPropagation()}>
                               <MoreVertical size={12} />
                             </Button>
                           </DropdownMenuTrigger>
                           <DropdownMenuContent className="bg-slate-900 border-slate-800">
-                            <DropdownMenuItem onClick={() => { setActiveDoc(doc as any); setCurrentView('doc_detail'); }}>
+                            <DropdownMenuItem onClick={() => { setActiveDoc(doc as any); fetchDocContent(doc.filename); setView('doc_detail', doc.filename); }}>
                               <Edit3 size={14} className="mr-2" />Editar
                             </DropdownMenuItem>
                             <DropdownMenuItem onClick={() => deleteDocument(doc.filename)} className="text-red-400">
@@ -612,13 +756,13 @@ export default function App() {
 
       case 'doc_detail':
         if (!activeDoc) {
-          setCurrentView('repository');
-          return null;
+           setView('repository');
+           return null;
         }
         return (
           <div className="max-w-3xl flex-1 flex flex-col space-y-4">
             <div className="flex items-center gap-2">
-              <Button variant="ghost" size="sm" onClick={() => { setActiveDoc(null); setCurrentView('repository'); }} className="p-0 h-auto">
+              <Button variant="ghost" size="sm" onClick={() => { setActiveDoc(null); setView('repository'); }} className="p-0 h-auto">
                 <ChevronLeft size={16} className="text-slate-400" />
               </Button>
               <span className="text-xs text-slate-500">Volver al repositorio</span>
@@ -654,17 +798,23 @@ export default function App() {
                 }}
                 className="w-36 text-xs h-6"
               />
-            </div>
+               </div>
 
             <div className="flex items-center gap-4 text-xs text-slate-500 pb-2 border-b border-slate-800">
               <span className="flex items-center gap-1">
-                <Calendar size={12} />
+                                <Calendar size={14} />
                 Creado: {activeDoc.created_at ? new Date(activeDoc.created_at).toLocaleDateString() : 'Desconocido'}
               </span>
               <span className="flex items-center gap-1">
-                <FileText size={12} />
+                                <FileText size={14} />
                 {activeDoc.chunks_count} chunks
               </span>
+              {activeDoc.file_path && (
+                <span className="flex items-center gap-1">
+                                <FileDown size={14} />
+                  <a href={`${API_BASE}/documents/${encodeURIComponent(activeDoc.filename)}/download`} className="hover:underline">Descargar original</a>
+                </span>
+              )}
               <div className="flex items-center gap-2 ml-auto">
                 <Switch
                   checked={activeDoc.rag_enabled}
@@ -675,20 +825,45 @@ export default function App() {
                 />
                 <span className="text-xs">{activeDoc.rag_enabled ? 'RAG activado' : 'RAG desactivado'}</span>
               </div>
-               </div>
+            </div>
 
-            <div className="flex justify-between items-center">
+            {activeDoc.type === 'note' && (
+              <Textarea
+                placeholder="Contenido de la nota (Markdown soportado)..."
+                value={docContent}
+                onChange={e => setDocContent(e.target.value)}
+                className="flex-1 min-h-[300px] bg-slate-900 border-slate-800 font-mono text-sm resize-y"
+              />
+            )}
+
+            <div className="flex gap-2 justify-end">
+              <Button
+                variant="outline" size="sm"
+                onClick={() => { setActiveDoc(null); setView('repository'); }}
+              >
+                Cancelar
+              </Button>
               <Button
                 onClick={async () => {
+                  if (activeDoc.type === 'note') {
+                    await fetch(`${API_BASE}/ingest`, {
+                      method: 'POST',
+                      headers: { 'Content-Type': 'application/json' },
+                      body: JSON.stringify({
+                        filename: activeDoc.filename,
+                        text: docContent,
+                        type: 'note',
+                        tags: activeDoc.tags || []
+                      })
+                    });
+                  }
                   await updateDocTags(activeDoc.filename, activeDoc.tags || []);
                   fetchDocuments();
-                  setCurrentView('repository');
+                   setView('repository');
                 }}
-                disabled={ingestLoading}
                 className="bg-indigo-600 hover:bg-indigo-500 text-white"
               >
-                {ingestLoading ? <Loader2 size={14} className="animate-spin" /> : <CheckCircle2 size={14} />}
-                Guardar cambios
+                <CheckCircle2 size={14} /> Guardar
               </Button>
             </div>
           </div>
@@ -708,20 +883,20 @@ export default function App() {
 
          <nav className="space-y-1 flex-1">
           <button
-            onClick={() => setCurrentView('dashboard')}
+            onClick={() => handleViewChange('dashboard')}
             className={`w-full text-left px-3 py-2 rounded-xl text-xs font-semibold flex items-center gap-2 transition-colors ${
               currentView === 'dashboard' ? 'bg-indigo-600 text-white' : 'text-slate-400 hover:bg-slate-800'
             }`}
           >
-            <Layers size={14} /> Panel de Control
+             <Layers size={20} /> Panel de Control
           </button>
           <button
-            onClick={() => setCurrentView('repository')}
+            onClick={() => handleViewChange('repository')}
             className={`w-full text-left px-3 py-2 rounded-xl text-xs font-semibold flex items-center gap-2 transition-colors ${
               currentView === 'repository' ? 'bg-indigo-600 text-white' : 'text-slate-400 hover:bg-slate-800'
             }`}
           >
-            <Folder size={14} /> Invernadero de Datos
+             <Folder size={20} /> Activos de Información
           </button>
         </nav>
 
@@ -738,7 +913,7 @@ export default function App() {
             }}
             className="w-full bg-gradient-to-r from-indigo-600 to-violet-600 hover:brightness-110 text-white py-2.5 text-xs font-bold rounded-xl flex items-center justify-center gap-2 shadow-lg shadow-indigo-600/10"
           >
-            <Plus size={14} /> Nueva Data
+            <Plus size={16} /> Nueva Data
           </button>
         </div>
 
@@ -852,7 +1027,7 @@ export default function App() {
                                 if (doc) {
                                   setActiveDoc(doc as any);
                                   setDocContent('');
-                                  setCurrentView('doc_detail');
+                                  setView('doc_detail', doc.filename);
                                 }
                               }}
                             >

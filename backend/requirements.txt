@@ -7,6 +7,6 @@ pgvector==0.5.1
 requests==2.34.2
 python-dotenv==1.2.4
 python-multipart==0.0.12
-PyPDF2==3.0.1
+pypdf==6.21.4
 pytesseract==0.3.10
 Pillow==11.3.0

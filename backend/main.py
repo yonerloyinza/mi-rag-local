@@ -11,7 +11,7 @@ from typing import Optional
 from sqlalchemy.orm import Session
 from sqlalchemy import text, func, select
 
-from database import get_db, DocumentChunk, ChatHistory, SessionLocal
+from database import get_db, DocumentChunk, Document, ChatHistory, SessionLocal, UPLOAD_DIR, VAULT_DIR, get_file_paths, generate_file_hash
 
 app = FastAPI(title="Cerebro RAG - Gestión Unificada de Conocimiento")
 
@@ -94,18 +94,46 @@ def condense_query(history_context: str, current_question: str) -> str:
     except Exception:
         return current_question
 
-def _process_text(db: Session, filename: str, text_content: str, doc_type: str = "note", tags: list[str] = None) -> int:
+def _process_text(db: Session, filename: str, text_content: str, doc_type: str = "note", tags: list[str] = None, save_original: bool = True) -> int:
     if tags is None:
         tags = []
     if not text_content.strip():
         raise HTTPException(status_code=400, detail="El texto no puede estar vacío.")
 
-    db.query(DocumentChunk).filter(DocumentChunk.filename == filename).delete()
+    existing = db.query(Document).filter(Document.filename == filename).first()
+    if existing:
+        if existing.file_path and os.path.exists(existing.file_path):
+            os.remove(existing.file_path)
+        db.delete(existing)
+        db.commit()
+
+    file_path = None
+    file_hash = None
+    original_filename = filename
+    if save_original:
+        is_note = doc_type == "note"
+        file_path, file_hash, _ = get_file_paths(filename, text_content.encode('utf-8'), is_note=is_note)
+        with open(file_path, 'w', encoding='utf-8') as f:
+            f.write(text_content)
+
+    doc = Document(
+        filename=filename,
+        type=doc_type,
+        file_path=file_path,
+        file_hash=file_hash,
+        original_filename=original_filename,
+        tags=tags,
+        rag_enabled=True
+    )
+    db.add(doc)
+    db.commit()
+    db.refresh(doc)
 
     chunks = chunk_text(text_content)
     for chunk in chunks:
         vector = get_ollama_embedding(chunk)
         db_chunk = DocumentChunk(
+            document_id=doc.id,
             filename=filename,
             content=chunk,
             embedding=vector,
@@ -117,8 +145,11 @@ def _process_text(db: Session, filename: str, text_content: str, doc_type: str =
     db.commit()
 
     db.execute(text(
-        "UPDATE document_chunks SET search_vector = to_tsvector('pg_catalog.spanish', content) WHERE filename = :f"
-    ).params(f=filename))
+        "UPDATE document_chunks SET search_vector = to_tsvector('pg_catalog.spanish', content) WHERE document_id = :d"
+    ).params(d=doc.id))
+    db.execute(text(
+        "UPDATE document_chunks SET tags = :tags, rag_enabled = :rag WHERE document_id = :d"
+    ).params(tags=tags, rag=True, d=doc.id))
     db.commit()
     return len(chunks)
 
@@ -168,84 +199,133 @@ def list_documents(
     tag_filter: Optional[str] = None,
     db: Session = Depends(get_db)
 ):
-    base = db.query(DocumentChunk)
+    q = db.query(Document)
     if search:
-        base = base.filter(DocumentChunk.filename.like(f"%{search}%"))
+        q = q.filter(Document.filename.like(f"%{search}%"))
     if type_filter:
-        base = base.filter(DocumentChunk.type == type_filter)
+        q = q.filter(Document.type == type_filter)
     if tag_filter:
-        base = base.filter(func.array_position(DocumentChunk.tags, tag_filter) > 0)
-
-    distinct_filenames = db.query(DocumentChunk.filename).filter(
-        DocumentChunk.filename != None
-    )
-    if search:
-        distinct_filenames = distinct_filenames.filter(DocumentChunk.filename.like(f"%{search}%"))
-    if type_filter:
-        distinct_filenames = distinct_filenames.filter(DocumentChunk.type == type_filter)
-    if tag_filter:
-        distinct_filenames = distinct_filenames.filter(func.array_position(DocumentChunk.tags, tag_filter) > 0)
-    distinct_filenames = distinct_filenames.distinct().all()
+        q = q.filter(func.array_position(Document.tags, tag_filter) > 0)
+    docs = q.order_by(Document.created_at.desc()).all()
 
     documents = []
-    for (fname,) in distinct_filenames:
-        first_chunk = base.filter(DocumentChunk.filename == fname).first()
-        doc_type = first_chunk.type if first_chunk else None
-        chunks_count = base.filter(DocumentChunk.filename == fname).count()
+    for doc in docs:
+        chunks_count = db.query(DocumentChunk).filter(DocumentChunk.document_id == doc.id).count()
         documents.append({
-            "filename": fname,
-            "type": doc_type,
+            "id": doc.id,
+            "filename": doc.filename,
+            "type": doc.type,
+            "file_path": doc.file_path,
+            "file_hash": doc.file_hash,
+            "original_filename": doc.original_filename,
             "chunks_count": chunks_count,
-            "tags": first_chunk.tags or [] if first_chunk else [],
-            "rag_enabled": first_chunk.rag_enabled if first_chunk else True,
-            "created_at": first_chunk.created_at.isoformat() if first_chunk and first_chunk.created_at else None,
-            "updated_at": first_chunk.updated_at.isoformat() if first_chunk and first_chunk.updated_at else None,
+            "tags": doc.tags or [],
+            "rag_enabled": doc.rag_enabled,
+            "created_at": doc.created_at.isoformat() if doc.created_at else None,
+            "updated_at": doc.updated_at.isoformat() if doc.updated_at else None,
         })
     return {"documents": documents}
 
 @app.get("/api/items")
 def list_knowledge_items(db: Session = Depends(get_db)):
-    distinct = db.query(DocumentChunk.filename, DocumentChunk.type).filter(
-        DocumentChunk.filename != None
-    ).distinct().all()
-
+    docs = db.query(Document).order_by(Document.created_at.desc()).all()
     items = []
-    for fname, dtype in distinct:
-        first = db.query(DocumentChunk).filter(DocumentChunk.filename == fname).first()
+    for doc in docs:
         items.append({
-            "filename": fname,
-            "type": dtype,
-            "tags": first.tags or [] if first else [],
-            "rag_enabled": first.rag_enabled if first else True,
+            "filename": doc.filename,
+            "type": doc.type,
+            "tags": doc.tags or [],
+            "rag_enabled": doc.rag_enabled,
         })
     return items
 
 @app.post("/api/ingest")
 def ingest_item(payload: IngestRequest, db: Session = Depends(get_db)):
-    _process_text(db, payload.filename, payload.text, payload.type, payload.tags)
-    return {"status": "success", "message": f"'{payload.filename}' guardado e indexado.", "chunks": len(chunk_text(payload.text))}
+    filename = payload.filename
+    if payload.type == "note" and not filename.endswith('.md'):
+        if filename.endswith('.txt'):
+            filename = filename[:-4] + '.md'
+        elif '.' in filename:
+            filename = filename.rsplit('.', 1)[0] + '.md'
+        else:
+            filename = filename + '.md'
+    chunk_count = _process_text(db, filename, payload.text, payload.type, payload.tags)
+    return {"status": "success", "message": f"'{filename}' guardado e indexado.", "chunks": chunk_count}
 
 @app.delete("/api/documents/{filename}")
 def delete_document(filename: str, db: Session = Depends(get_db)):
-    deleted = db.query(DocumentChunk).filter(DocumentChunk.filename == filename).delete()
-    db.commit()
-    if deleted == 0:
+    doc = db.query(Document).filter(Document.filename == filename).first()
+    if not doc:
         raise HTTPException(status_code=404, detail="Documento no encontrado.")
-    return {"status": "success", "message": f"'{filename}' eliminado.", "deleted_chunks": deleted}
+    if doc.file_path and os.path.exists(doc.file_path):
+        os.remove(doc.file_path)
+    db.delete(doc)
+    db.commit()
+    return {"status": "success", "message": f"'{filename}' eliminado."}
 
 @app.patch("/api/documents/{filename}/toggle-rag")
 def toggle_rag(filename: str, db: Session = Depends(get_db)):
-    db.query(DocumentChunk).filter(DocumentChunk.filename == filename).update(
-        {"rag_enabled": ~DocumentChunk.rag_enabled}
-    )
+    doc = db.query(Document).filter(Document.filename == filename).first()
+    if not doc:
+        raise HTTPException(status_code=404, detail="Documento no encontrado.")
+    doc.rag_enabled = not doc.rag_enabled
+    db.query(DocumentChunk).filter(DocumentChunk.document_id == doc.id).update({"rag_enabled": doc.rag_enabled})
     db.commit()
-    return {"status": "success", "message": "Estado RAG alternado."}
+    return {"status": "success", "message": "Estado RAG alternado.", "rag_enabled": doc.rag_enabled}
 
 @app.patch("/api/documents/{filename}/tags")
 def update_tags(filename: str, tags: list[str], db: Session = Depends(get_db)):
-    db.query(DocumentChunk).filter(DocumentChunk.filename == filename).update({"tags": tags})
+    doc = db.query(Document).filter(Document.filename == filename).first()
+    if not doc:
+        raise HTTPException(status_code=404, detail="Documento no encontrado.")
+    doc.tags = tags
+    db.query(DocumentChunk).filter(DocumentChunk.document_id == doc.id).update({"tags": tags})
     db.commit()
     return {"status": "success", "message": "Tags actualizados.", "tags": tags}
+
+@app.get("/api/documents/{filename}")
+def get_document(filename: str, db: Session = Depends(get_db)):
+    doc = db.query(Document).filter(Document.filename == filename).first()
+    if not doc:
+        raise HTTPException(status_code=404, detail="Documento no encontrado.")
+    content = ""
+    if doc.file_path and os.path.exists(doc.file_path):
+        with open(doc.file_path, 'r', encoding='utf-8') as f:
+            content = f.read()
+    return {
+        "filename": doc.filename,
+        "type": doc.type,
+        "file_path": doc.file_path,
+        "file_hash": doc.file_hash,
+        "original_filename": doc.original_filename,
+        "content": content,
+        "tags": doc.tags or [],
+        "rag_enabled": doc.rag_enabled,
+        "chunks_count": db.query(DocumentChunk).filter(DocumentChunk.document_id == doc.id).count(),
+        "created_at": doc.created_at.isoformat() if doc.created_at else None,
+        "updated_at": doc.updated_at.isoformat() if doc.updated_at else None,
+    }
+
+@app.get("/api/documents/{filename}/download")
+def download_document(filename: str, db: Session = Depends(get_db)):
+    doc = db.query(Document).filter(Document.filename == filename).first()
+    if not doc:
+        raise HTTPException(status_code=404, detail="Documento no encontrado.")
+    if not doc.file_path or not os.path.exists(doc.file_path):
+        raise HTTPException(status_code=404, detail="Archivo original no encontrado.")
+    from fastapi.responses import FileResponse
+    return FileResponse(doc.file_path, filename=doc.original_filename or doc.filename)
+
+@app.get("/api/documents/{filename}/content")
+def get_document_content(filename: str, db: Session = Depends(get_db)):
+    doc = db.query(Document).filter(Document.filename == filename).first()
+    if not doc:
+        raise HTTPException(status_code=404, detail="Documento no encontrado.")
+    content = ""
+    if doc.file_path and os.path.exists(doc.file_path):
+        with open(doc.file_path, 'r', encoding='utf-8') as f:
+            content = f.read()
+    return {"filename": doc.filename, "content": content}
 
 @app.post("/api/ingest-file")
 def ingest_file(
@@ -255,7 +335,7 @@ def ingest_file(
     tags: str = Form(""),
     db: Session = Depends(get_db)
 ):
-    import PyPDF2
+    import pypdf
     import io
     import pytesseract
     from PIL import Image
@@ -269,7 +349,7 @@ def ingest_file(
 
     if ext == 'pdf':
         try:
-            reader = PyPDF2.PdfReader(io.BytesIO(contents))
+            reader = pypdf.PdfReader(io.BytesIO(contents))
             text_parts = [page.extract_text() or '' for page in reader.pages]
             text_content = '\n'.join(text_parts)
         except Exception as e:
@@ -288,14 +368,22 @@ def ingest_file(
     if not text_content.strip():
         raise HTTPException(status_code=400, detail="El archivo no contiene texto legible.")
 
-    if filename.endswith('.txt'):
-        pass
-    else:
-        filename = filename if '.' in filename else f"{filename}.txt"
+    if not filename.endswith(f'.{ext}'):
+        filename = f"{filename}.{ext}" if ext else f"{filename}.txt"
 
     tag_list = [t.strip() for t in tags.split(',') if t.strip()] if tags else []
 
-    chunk_count = _process_text(db, filename, text_content, item_type, tag_list)
+    hashed_path, file_hash, saved_ext = get_file_paths(filename, contents, is_note=False)
+    with open(hashed_path, 'wb') as f:
+        f.write(contents)
+
+    chunk_count = _process_text(db, filename, text_content, item_type, tag_list, save_original=False)
+    doc = db.query(Document).filter(Document.filename == filename).first()
+    if doc:
+        doc.file_path = hashed_path
+        doc.file_hash = file_hash
+        doc.original_filename = filename
+        db.commit()
     return {"status": "success", "message": f"'{filename}' guardado e indexado.", "chunks": chunk_count}
 
 @app.get("/api/tags")

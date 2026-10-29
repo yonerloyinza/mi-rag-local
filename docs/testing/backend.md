@@ -6,15 +6,16 @@
 - Mocking: `pytest-mock` (mocker.patch)
 - DB: usa `database.py` SessionLocal (conexión real a PostgreSQL)
 
-## Tests existentes (7)
+## Tests existentes (8)
 
 | Test | Qué valida | Mocks |
 |------|-----------|-------|
 | `test_chunk_text_logic` | Chunking 400/80 | — |
-| `test_ingest_endpoint_success` | POST /api/ingest 200 | `get_ollama_embedding` |
+| `test_ingest_endpoint_success` | POST /api/ingest creates Document + chunks | `get_ollama_embedding` |
 | `test_ingest_endpoint_empty_text` | POST /api/ingest 400 | — |
 | `test_query_endpoint_success` | POST /api/query SSE | `get_ollama_embedding`, `condense_query`, `evaluate_rag`, `requests.post` |
-| `test_list_documents` | GET /api/documents structure | — |
+| `test_list_documents` | GET /api/documents unique filenames, structure | — |
+| `test_list_knowledge_items_no_duplicates` | GET /api/items unique (filename, type) pairs | — |
 | `test_list_tags` | GET /api/tags returns list | — |
 | `test_ingest_file_endpoint_txt` | POST /api/ingest-file TXT 200 | `get_ollama_embedding` |
 

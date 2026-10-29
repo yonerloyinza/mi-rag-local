@@ -10,6 +10,9 @@
 | `2a1e5bf9a137` | Search vector híbrida | `search_vector`, GIN idx, trigger |
 | `add_gin_idx_002` | Índice GIN explícito | `ix_document_chunks_search_vector` |
 | `ceb7a10927d3` | Tags, rag_enabled, updated_at | `tags`, `rag_enabled`, `updated_at` |
+| `ff769120a3a6` | eval_score en chat | `chat_history.eval_score` |
+| `4964678139c4` | Tabla documents + FK | Nueva tabla `documents`, `document_id` en `document_chunks` |
+| `eb9abba415d1` | file_hash, original_filename | `documents.file_hash`, `documents.original_filename` |
 
 ## Comandos
 

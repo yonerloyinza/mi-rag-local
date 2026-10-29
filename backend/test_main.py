@@ -19,7 +19,7 @@ def test_ingest_endpoint_success(mocker):
     mocker.patch("main.get_ollama_embedding", return_value=mock_vector)
 
     payload = {
-        "filename": "test_documento.txt",
+        "filename": "test_documento.md",
         "text": "Este es un texto corto de prueba para validar que el endpoint de ingesta guarda los vectores.",
         "type": "note",
         "tags": ["test", "pytest"]
@@ -71,18 +71,36 @@ def test_query_endpoint_success(mocker):
 
 
 def test_list_documents(mocker):
-    """Document listing endpoint returns correct structure."""
+    """Document listing endpoint returns correct structure without duplicates."""
     response = client.get("/api/documents")
     assert response.status_code == 200
     body = response.json()
     assert "documents" in body
     assert isinstance(body["documents"], list)
+
+    filenames = [doc["filename"] for doc in body["documents"]]
+    assert len(filenames) == len(set(filenames)), "Duplicate filenames detected in /api/documents"
+
     for doc in body["documents"]:
         assert "filename" in doc
         assert "type" in doc
         assert "chunks_count" in doc
         assert "tags" in doc
         assert "rag_enabled" in doc
+
+
+def test_list_knowledge_items_no_duplicates():
+    """Items endpoint returns unique (filename, type) pairs."""
+    response = client.get("/api/items")
+    assert response.status_code == 200
+    items = response.json()
+    assert isinstance(items, list)
+
+    seen = set()
+    for item in items:
+        key = (item["filename"], item["type"])
+        assert key not in seen, f"Duplicate item: {key}"
+        seen.add(key)
 
 
 def test_list_tags(mocker):

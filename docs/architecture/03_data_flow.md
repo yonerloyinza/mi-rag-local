@@ -5,15 +5,22 @@
 ```
 Usuario → "Nueva Data" modal → selecciona Nota/Archivo
     ↓
-Notas: POST /api/ingest {filename, text, type, tags}
-Archivos: POST /api/ingest-file (multipart)
-    ↓
-chunk_text(text, 400, 80) → lista de chunks
-    ↓
-get_ollama_embedding(chunk) → vector 768-dim
-    ↓
-INSERT INTO document_chunks (filename, content, embedding, type, tags, rag_enabled)
-UPDATE search_vector = to_tsvector('spanish', content)
+Notas (POST /api/ingest):
+  1. Generate hash-based file_path → vault/ab/cd/hash.md
+  2. Write original text to file in vault/
+  3. INSERT INTO documents (filename, type, file_path, file_hash, original_filename, ...)
+  4. chunk_text(text, 400, 80) → lista de chunks
+  5. get_ollama_embedding(chunk) → vector 768-dim [CACHE]
+  6. INSERT INTO document_chunks (document_id, filename, content, embedding, ...)
+  7. UPDATE search_vector = to_tsvector('spanish', content)
+
+Files (POST /api/ingest-file):
+  1. Extract text from file (PyPDF2/Tesseract/decode)
+  2. Generate hash-based file_path → uploads/ab/cd/hash.ext
+  3. Write original bytes to file in uploads/
+  4. INSERT INTO documents (filename, type, file_path, file_hash, original_filename, ...)
+  5. chunk_text + embedding + INSERT INTO document_chunks (document_id, ...)
+  6. UPDATE search_vector
 ```
 
 ## 2. Query RAG (Chat)
@@ -23,7 +30,7 @@ Usuario → POST /api/query {question, session_id}
     ↓
 1. Retrieve ChatHistory (last 4 msgs, ordered ASC)
 2. condense_query(history, question) → search_query
-3. get_ollama_embedding(search_query) → vector
+3. get_ollama_embedding(search_query) → vector [CACHE]
 4. Vector search: ORDER BY embedding.cosine_distance LIMIT 8
 5. Full-text search: search_vector @@ to_tsquery LIMIT 8
 6. RRF(k=60) merge → top 3 chunks (score >= 1/(k+3))
@@ -32,8 +39,9 @@ Usuario → POST /api/query {question, session_id}
    - condensed_query
    - token (each chunk)
    - sources (after response complete, empty if no-info detected)
-   - evaluation (faithfulness/relevance)
+   - evaluation_done (async evaluation queued)
 9. Save to ChatHistory (cleaned of apology prefixes)
+10. _run_eval_async(): background thread evaluates faithfulness/relevance
 ```
 
 ## 3. Búsqueda Receptiva

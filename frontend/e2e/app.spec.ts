@@ -13,7 +13,7 @@ test.describe('Cerebro RAG Lab - Web Tests', () => {
     await page.waitForSelector('button', { hasText: 'Panel de Control' });
     await expect(page.locator('button', { hasText: 'Panel de Control' })).toBeVisible();
      await expect(page.locator('button', { hasText: 'Nueva Data' })).toBeVisible();
-    await expect(page.locator('button', { hasText: 'Invernadero de Datos' })).toBeVisible();
+    await expect(page.locator('button', { hasText: 'Activos de Información' })).toBeVisible();
     await expect(page.locator('button', { hasText: 'Invocar Copiloto AI' })).toBeVisible();
     await expect(page.locator('text=Base de datos')).toBeVisible();
   });
@@ -64,8 +64,8 @@ test.describe('Cerebro RAG Lab - Web Tests', () => {
     await page.locator('button', { hasText: 'Cancelar' }).click();
     await expect(page.locator('button', { hasText: 'Nota' })).not.toBeVisible();
 
-    await page.locator('button', { hasText: 'Invernadero de Datos' }).click();
-    await expect(page.getByRole('heading', { name: 'Invernadero de Datos' })).toBeVisible();
+    await page.locator('button', { hasText: 'Activos de Información' }).click();
+    await expect(page.getByRole('heading', { name: 'Activos de Información' })).toBeVisible();
     await expect(page.getByPlaceholder('Buscar notas, documentos o tags...')).toBeVisible();
 
     await page.locator('button', { hasText: 'Panel de Control' }).click();
