@@ -1,5 +1,7 @@
 import os
 import hashlib
+import datetime
+from enum import Enum
 from dotenv import load_dotenv
 from sqlalchemy import create_engine, Column, Integer, String, Text, DateTime, Boolean, func, event, ForeignKey, JSON
 from sqlalchemy.orm import declarative_base, sessionmaker, relationship
@@ -55,10 +57,13 @@ class Document(Base):
     original_filename = Column(String, nullable=True)
     tags = Column(ARRAY(String), default=[])
     rag_enabled = Column(Boolean, default=True)
+    owner_id = Column(Integer, ForeignKey("users.id"), nullable=True, index=True)
     created_at = Column(DateTime, server_default=func.now())
     updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now())
 
     chunks = relationship("DocumentChunk", back_populates="document", cascade="all, delete-orphan")
+    owner = relationship("User", back_populates="documents", foreign_keys="[Document.owner_id]")
+    shares = relationship("DocumentShare", back_populates="document", cascade="all, delete-orphan")
 
 class DocumentChunk(Base):
     __tablename__ = "document_chunks"
@@ -76,6 +81,76 @@ class DocumentChunk(Base):
     search_vector = Column(TSVECTOR, nullable=True)
 
     document = relationship("Document", back_populates="chunks")
+
+class UserRole(Base):
+    __tablename__ = "user_roles"
+    id = Column(Integer, primary_key=True, index=True)
+    name = Column(String(50), unique=True, nullable=False, index=True)
+    description = Column(String(255), default="")
+    permissions = relationship("UserRolePermission", backref="role")
+
+class Permission(Base):
+    __tablename__ = "permissions"
+    id = Column(Integer, primary_key=True, index=True)
+    name = Column(String(100), unique=True, nullable=False, index=True)
+    description = Column(String(255), default="")
+
+class UserRolePermission(Base):
+    __tablename__ = "role_permissions"
+    id = Column(Integer, primary_key=True, index=True)
+    role_id = Column(Integer, ForeignKey("user_roles.id", ondelete="CASCADE"), nullable=False)
+    permission_id = Column(Integer, ForeignKey("permissions.id", ondelete="CASCADE"), nullable=False)
+    permission = relationship("Permission")
+
+class User(Base):
+    __tablename__ = "users"
+
+    id = Column(Integer, primary_key=True, index=True)
+    email = Column(String(255), unique=True, nullable=False, index=True)
+    username = Column(String(100), unique=True, nullable=False, index=True)
+    password_hash = Column(String(255), nullable=False)
+    full_name = Column(String(255), default="")
+    is_active = Column(Boolean, default=True, nullable=False)
+    is_admin = Column(Boolean, default=False, nullable=False)
+    created_at = Column(DateTime, server_default=func.now())
+    updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now())
+
+    role_id = Column(Integer, ForeignKey("user_roles.id"), nullable=True)
+    role = relationship("UserRole")
+    documents = relationship("Document", back_populates="owner")
+    shares = relationship("DocumentShare", back_populates="user", foreign_keys="[DocumentShare.user_id]")
+
+    def has_permission(self, permission_name: str) -> bool:
+        if self.is_admin:
+            return True
+        if self.role is None:
+            return False
+        return any(perm.permission.name == permission_name for perm in self.role.permissions)
+
+class DocumentPermissionLevel(str, Enum):
+    READ = "read"
+    WRITE = "write"
+    ADMIN = "admin"
+
+class DocumentShare(Base):
+    __tablename__ = "document_shares"
+
+    id = Column(Integer, primary_key=True, index=True)
+    document_id = Column(Integer, ForeignKey("documents.id", ondelete="CASCADE"), nullable=False, index=True)
+    user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+    permission_level = Column(String(20), default=DocumentPermissionLevel.READ.value, nullable=False)
+    shared_by_id = Column(Integer, ForeignKey("users.id"), nullable=True)
+    created_at = Column(DateTime, server_default=func.now())
+
+    document = relationship("Document", back_populates="shares")
+    user = relationship("User", back_populates="shares", foreign_keys="[DocumentShare.user_id]")
+    shared_by = relationship("User", foreign_keys="[DocumentShare.shared_by_id]")
+
+__all__ = [
+    "Document", "DocumentChunk", "ChatHistory", "UserRole",
+    "Permission", "UserRolePermission", "User", "DocumentShare",
+    "DocumentPermissionLevel", "get_db"
+]
 
 class ChatHistory(Base):
     __tablename__ = "chat_history"

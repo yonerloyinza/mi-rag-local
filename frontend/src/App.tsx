@@ -67,6 +67,13 @@ interface Message {
 
 type View = 'dashboard' | 'repository' | 'doc_detail';
 
+const viewFromLocation = (): View => {
+  const path = window.location.pathname;
+  if (path === '/repository') return 'repository';
+  if (path.startsWith('/document/')) return 'doc_detail';
+  return 'dashboard';
+};
+
 const RiSvg = ({ d, className = 'w-5 h-5' }: { d: string; className?: string }) => (
   <svg viewBox="0 0 24 24" fill="currentColor" xmlns="http://www.w3.org/2000/svg" className={className}><path d={d}/></svg>
 );
@@ -120,7 +127,7 @@ const getDocIcon = (filename: string, docType: string): { icon: React.ElementTyp
 };
 
 export default function App() {
-  const [currentView, setCurrentViewState] = useState<View>('dashboard');
+  const [currentView, setCurrentViewState] = useState<View>(viewFromLocation);
   const [items, setItems] = useState<KnowledgeItem[]>([]);
   const [documents, setDocuments] = useState<DocumentDetail[]>([]);
   const [tags, setTags] = useState<string[]>([]);
@@ -152,11 +159,153 @@ export default function App() {
   const [chatLoading, setChatLoading] = useState(false);
   const [session_id] = useState(() => `session_${Math.random().toString(36).substring(2, 11)}`);
   const [dbConnected, setDbConnected] = useState<boolean | null>(null);
+  const [isAuthenticated, setIsAuthenticated] = useState<boolean>(false);
+  const [authChecked, setAuthChecked] = useState<boolean>(false);
+  const [currentUser, setCurrentUser] = useState<any>(null);
+  const [pathname, setPathname] = useState<string>(() => window.location.pathname);
+  const [documentsLoaded, setDocumentsLoaded] = useState<boolean>(false);
+  const refreshPromiseRef = useRef<Promise<boolean> | null>(null);
 
-  const API_BASE = 'http://127.0.0.1:8000/api';
+  const API_BASE = '/api';
 
   const chatInputRef = useRef<HTMLTextAreaElement>(null);
   const chatScrollRef = useRef<HTMLDivElement>(null);
+
+  // --- Auth ---
+  const navigate = (path: string, replace = false) => {
+    if (replace) {
+      window.history.replaceState({}, '', path);
+    } else {
+      window.history.pushState({}, '', path);
+    }
+    setPathname(path);
+  };
+
+  const clearSession = () => {
+    setIsAuthenticated(false);
+    setCurrentUser(null);
+    setAuthChecked(true);
+  };
+
+  const refreshSession = async (): Promise<boolean> => {
+    // Evita que varias peticiones 401 disparen refrescos en paralelo.
+    if (refreshPromiseRef.current) return refreshPromiseRef.current;
+
+    refreshPromiseRef.current = fetch('/auth/refresh', {
+      method: 'POST',
+      credentials: 'include',
+    })
+      .then(res => res.ok)
+      .catch(() => false)
+      .finally(() => {
+        refreshPromiseRef.current = null;
+      });
+
+    return refreshPromiseRef.current;
+  };
+
+  const fetchCurrentUser = async () => {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 10000);
+    try {
+      let res = await fetch('/auth/me', {
+        credentials: 'include',
+        signal: controller.signal,
+      });
+      if (res.status === 401 && await refreshSession()) {
+        res = await fetch('/auth/me', {
+          credentials: 'include',
+          signal: controller.signal,
+        });
+      }
+      return res.ok ? await res.json() : null;
+    } catch {
+      return null;
+    } finally {
+      clearTimeout(timeoutId);
+    }
+  };
+
+  const authFetch = async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+    const isAuthRequest = typeof input === 'string' && input.startsWith('/auth/');
+    const doFetch = () => fetch(input, {
+      ...init,
+      credentials: 'include',
+      headers: {
+        ...(init?.headers || {}),
+      },
+    });
+
+    let res = await doFetch();
+    if (res.status === 401 && !isAuthRequest) {
+      if (await refreshSession()) {
+        res = await doFetch();
+      }
+      if (res.status === 401) {
+        clearSession();
+        navigate('/login', true);
+      }
+    }
+    return res;
+  };
+
+  const login = async (email: string, password: string) => {
+    const res = await fetch('/auth/login', {
+      method: 'POST',
+      credentials: 'include',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ email, password }),
+    });
+    if (!res.ok) {
+      let detail = 'Credenciales inválidas';
+      try {
+        const body = await res.json();
+        if (body.detail) detail = body.detail;
+      } catch {
+        // La respuesta no era JSON: conserva el mensaje genérico.
+      }
+      throw new Error(detail);
+    }
+
+    const meRes = await fetch('/auth/me', { credentials: 'include' });
+    if (!meRes.ok) throw new Error('No se pudo iniciar la sesión');
+    const user = await meRes.json();
+    setCurrentUser(user);
+    setIsAuthenticated(true);
+    setAuthChecked(true);
+    setCurrentViewState('dashboard');
+    navigate('/', true);
+  };
+
+  const logout = async () => {
+    try {
+      await fetch('/auth/logout', {
+        method: 'POST',
+        credentials: 'include',
+      });
+    } finally {
+      clearSession();
+      setItems([]);
+      setDocuments([]);
+      setTags([]);
+      setDocumentsLoaded(false);
+      setActiveDoc(null);
+      setMessages([]);
+      navigate('/login', true);
+    }
+  };
+
+  const checkAuth = async (): Promise<boolean> => {
+    const user = await fetchCurrentUser();
+    if (user) {
+      setCurrentUser(user);
+      setIsAuthenticated(true);
+      setAuthChecked(true);
+      return true;
+    }
+    clearSession();
+    return false;
+  };
 
   // --- View + URL sync ---
   const setView = (view: View, filename?: string) => {
@@ -166,7 +315,7 @@ export default function App() {
     if (view === 'doc_detail' && filename) {
       path = `/document/${encodeURIComponent(filename)}`;
     }
-    window.history.pushState({ view, filename }, '', path);
+    navigate(path);
   };
 
   const handleViewChange = (view: View) => {
@@ -174,19 +323,19 @@ export default function App() {
     setView(view);
   };
 
-  // --- Data fetching ---
-  const fetchItems = async () => {
+  // --- Data authFetching ---
+  const authFetchItems = async () => {
     try {
-      const res = await fetch(`${API_BASE}/items`);
+      const res = await authFetch(`${API_BASE}/items`);
       if (res.ok) setItems(await res.json());
     } catch {
       console.error("Error al listar conocimiento");
     }
   };
 
-  const fetchDocuments = async () => {
+  const authFetchDocuments = async () => {
     try {
-      const res = await fetch(`${API_BASE}/documents`);
+      const res = await authFetch(`${API_BASE}/documents`);
       if (res.ok) {
         const data = await res.json();
         const uniqueDocs = (data.documents || []).filter(
@@ -202,13 +351,15 @@ export default function App() {
       }
     } catch {
       console.error("Error al listar documentos");
+    } finally {
+      setDocumentsLoaded(true);
     }
   };
 
-  const fetchDocContent = async (filename: string) => {
+  const authFetchDocContent = async (filename: string) => {
     setDocLoading(true);
     try {
-      const res = await fetch(`${API_BASE}/documents/${encodeURIComponent(filename)}/content`);
+      const res = await authFetch(`${API_BASE}/documents/${encodeURIComponent(filename)}/content`);
       if (res.ok) {
         const data = await res.json() as DocumentContent;
         setDocContent(data.content);
@@ -222,7 +373,7 @@ export default function App() {
 
   const checkDbHealth = async () => {
     try {
-      const res = await fetch(`${API_BASE}/health`);
+      const res = await authFetch(`${API_BASE}/health`);
       setDbConnected(res.ok);
     } catch {
       setDbConnected(false);
@@ -231,52 +382,94 @@ export default function App() {
   useEffect(() => {
     const handlePopState = () => {
       const path = window.location.pathname;
+      setPathname(path);
+      if (!isAuthenticated) return;
+
       if (path.startsWith('/document/')) {
-        const filename = decodeURIComponent(path.slice(10));
+        const filename = decodeURIComponent(path.slice('/document/'.length));
         const doc = documents.find(d => d.filename === filename);
         if (doc) {
           setActiveDoc(doc as any);
-          fetchDocContent(filename);
+          authFetchDocContent(filename);
           setCurrentViewState('doc_detail');
         } else {
-          setView('repository');
+          navigate('/repository', true);
+          setCurrentViewState('repository');
         }
       } else if (path === '/repository') {
-        setView('repository');
+        setCurrentViewState('repository');
+      } else if (path === '/login' || path === '/register') {
+        // El efecto de rutas de autenticación redirige a la vista principal.
+        return;
       } else {
-        setView('dashboard');
+        setCurrentViewState('dashboard');
       }
     };
     window.addEventListener('popstate', handlePopState);
     return () => window.removeEventListener('popstate', handlePopState);
-  }, [documents]);
+  }, [documents, isAuthenticated]);
 
+  // --- Check auth FIRST on mount, before any rendering ---
   useEffect(() => {
-    fetchItems();
-    fetchDocuments();
-    checkDbHealth();
+    let cancelled = false;
+    (async () => {
+      const authenticated = await checkAuth();
+      if (cancelled || !authenticated) return;
+      authFetchItems();
+      authFetchDocuments();
+      checkDbHealth();
+    })();
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
+  // Mantiene la URL y la vista sincronizadas, incluso después de recargar.
   useEffect(() => {
-    const path = window.location.pathname;
-    if (path.startsWith('/document/')) {
-      const filename = decodeURIComponent(path.slice(10));
+    if (!authChecked) return;
+
+    if (!isAuthenticated) {
+      if (pathname !== '/login' && pathname !== '/register') {
+        navigate('/login', true);
+      }
+      return;
+    }
+
+    if (pathname === '/login' || pathname === '/register') {
+      navigate('/', true);
+      return;
+    }
+
+    if (pathname === '/repository') {
+      setCurrentViewState('repository');
+      return;
+    }
+
+    if (pathname.startsWith('/document/')) {
+      // Try to restore document detail view.
+      // We check if documents have data; if not, we'll try on next cycle.
+      if (documents.length === 0) {
+        // Documents still loading, don't redirect yet.
+        // The popstate handler or a later effect call will try again.
+        return;
+      }
+      const filename = decodeURIComponent(pathname.slice('/document/'.length));
       const doc = documents.find(d => d.filename === filename);
       if (doc) {
         setActiveDoc(doc as any);
-        fetchDocContent(filename);
+        authFetchDocContent(filename);
         setCurrentViewState('doc_detail');
-        return;
+      } else {
+        // Documento no en la lista actual - ir a repository.
+        // El usuario podrá abrirlo de nuevo desde el repositorio.
+        navigate('/repository', true);
+        setCurrentViewState('repository');
       }
-    }
-    if (path === '/repository') {
-      setView('repository');
       return;
     }
-    if (path === '/') {
-      window.history.replaceState({ view: 'dashboard' }, '', '/');
-    }
-  }, [documents, items]);
+
+    setCurrentViewState('dashboard');
+  }, [authChecked, isAuthenticated, pathname, documentsLoaded, documents]);
 
   useEffect(() => {
     if (aiOpen) {
@@ -318,7 +511,7 @@ export default function App() {
           alert('El contenido es requerido');
           return;
         }
-        const res = await fetch(`${API_BASE}/ingest`, {
+        const res = await authFetch(`${API_BASE}/ingest`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
@@ -344,7 +537,7 @@ export default function App() {
         formData.append('filename', dataFile.name);
         formData.append('type', 'document');
         formData.append('tags', dataTags.join(','));
-        const res = await fetch(`${API_BASE}/ingest-file`, {
+        const res = await authFetch(`${API_BASE}/ingest-file`, {
           method: 'POST',
           body: formData
         });
@@ -365,8 +558,8 @@ export default function App() {
       setDataTagInput('');
       setDataContent('');
       setDataFile(null);
-      fetchItems();
-      fetchDocuments();
+      authFetchItems();
+      authFetchDocuments();
       setView('dashboard');
     } catch {
       alert("Error al conectar con el backend.");
@@ -376,8 +569,8 @@ export default function App() {
   };
   const toggleRag = async (filename: string) => {
     try {
-      await fetch(`${API_BASE}/documents/${encodeURIComponent(filename)}/toggle-rag`, { method: 'PATCH' });
-      fetchDocuments();
+      await authFetch(`${API_BASE}/documents/${encodeURIComponent(filename)}/toggle-rag`, { method: 'PATCH' });
+      authFetchDocuments();
     } catch (e) {
       console.error("Error toggling RAG:", e);
     }
@@ -386,9 +579,9 @@ export default function App() {
   const deleteDocument = async (filename: string) => {
     if (!confirm(`¿Eliminar "${filename}" y todos sus vectores?`)) return;
     try {
-      await fetch(`${API_BASE}/documents/${encodeURIComponent(filename)}`, { method: 'DELETE' });
-      fetchItems();
-      fetchDocuments();
+      await authFetch(`${API_BASE}/documents/${encodeURIComponent(filename)}`, { method: 'DELETE' });
+      authFetchItems();
+      authFetchDocuments();
       if (activeDoc?.filename === filename) {
         setActiveDoc(null);
         setView('repository');
@@ -400,12 +593,12 @@ export default function App() {
 
   const updateDocTags = async (filename: string, newTags: string[]) => {
     try {
-      await fetch(`${API_BASE}/documents/${encodeURIComponent(filename)}/tags`, {
+      await authFetch(`${API_BASE}/documents/${encodeURIComponent(filename)}/tags`, {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(newTags)
       });
-      fetchDocuments();
+      authFetchDocuments();
     } catch (e) {
       console.error("Error updating tags:", e);
     }
@@ -417,7 +610,7 @@ export default function App() {
       return;
     }
     try {
-      const res = await fetch(`${API_BASE}/search`, {
+      const res = await authFetch(`${API_BASE}/search`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -466,7 +659,7 @@ export default function App() {
     setMessages(newMessages);
 
     try {
-      const response = await fetch(`${API_BASE}/query`, {
+      const response = await authFetch(`${API_BASE}/query`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ question: userQuestion, session_id }),
@@ -528,7 +721,7 @@ export default function App() {
     switch (currentView) {
       case 'dashboard':
         return (
-          <div className="max-w-5xl space-y-8">
+          <div data-testid="dashboard-view" className="max-w-5xl space-y-8">
             <div>
               <h2 className="text-2xl font-black text-white">Panel de Control Global</h2>
               <p className="text-xs text-slate-400 mt-1">
@@ -598,8 +791,9 @@ export default function App() {
                     return (
                       <Card
                         key={doc.filename}
+                        data-testid={`doc-card-${doc.filename}`}
                         className="bg-slate-900 border-slate-800 cursor-pointer hover:border-indigo-500 transition-colors"
-                        onClick={() => { setActiveDoc(doc as any); fetchDocContent(doc.filename); setView('doc_detail', doc.filename); }}
+                        onClick={() => { setActiveDoc(doc as any); authFetchDocContent(doc.filename); setView('doc_detail', doc.filename); }}
                       >
                         <CardContent className="pt-3">
                           <div className="flex items-center gap-2">
@@ -621,7 +815,7 @@ export default function App() {
 
       case 'repository':
         return (
-          <div className="max-w-5xl flex-1 flex flex-col space-y-5">
+          <div data-testid="repository-view" className="max-w-5xl flex-1 flex flex-col space-y-5">
             <div>
               <h2 className="text-2xl font-black text-white">Activos de Información</h2>
               <p className="text-xs text-slate-400 mt-1">Tu repositorio de conocimiento indexado.</p>
@@ -688,8 +882,9 @@ export default function App() {
                 return (
                   <Card
                     key={doc.filename}
+                    data-testid={`doc-card-${doc.filename}`}
                     className="bg-slate-900 border-slate-800 hover:border-indigo-500 transition-all cursor-pointer"
-                    onClick={() => { setActiveDoc(doc as any); fetchDocContent(doc.filename); setView('doc_detail', doc.filename); }}
+                    onClick={() => { setActiveDoc(doc as any); authFetchDocContent(doc.filename); setView('doc_detail', doc.filename); }}
                   >
                     <CardContent className="p-4 space-y-2">
                       <div className="flex items-start justify-between">
@@ -704,7 +899,7 @@ export default function App() {
                             </Button>
                           </DropdownMenuTrigger>
                           <DropdownMenuContent className="bg-slate-900 border-slate-800">
-                            <DropdownMenuItem onClick={() => { setActiveDoc(doc as any); fetchDocContent(doc.filename); setView('doc_detail', doc.filename); }}>
+                            <DropdownMenuItem onClick={() => { setActiveDoc(doc as any); authFetchDocContent(doc.filename); setView('doc_detail', doc.filename); }}>
                               <Edit3 size={14} className="mr-2" />Editar
                             </DropdownMenuItem>
                             <DropdownMenuItem onClick={() => deleteDocument(doc.filename)} className="text-red-400">
@@ -756,8 +951,11 @@ export default function App() {
 
       case 'doc_detail':
         if (!activeDoc) {
-           setView('repository');
-           return null;
+          return (
+            <div className="flex-1 flex items-center justify-center gap-2 text-xs text-slate-400">
+              <Loader2 size={16} className="animate-spin" /> Cargando documento...
+            </div>
+          );
         }
         return (
           <div className="max-w-3xl flex-1 flex flex-col space-y-4">
@@ -846,7 +1044,7 @@ export default function App() {
               <Button
                 onClick={async () => {
                   if (activeDoc.type === 'note') {
-                    await fetch(`${API_BASE}/ingest`, {
+                    await authFetch(`${API_BASE}/ingest`, {
                       method: 'POST',
                       headers: { 'Content-Type': 'application/json' },
                       body: JSON.stringify({
@@ -858,7 +1056,7 @@ export default function App() {
                     });
                   }
                   await updateDocTags(activeDoc.filename, activeDoc.tags || []);
-                  fetchDocuments();
+                  authFetchDocuments();
                    setView('repository');
                 }}
                 className="bg-indigo-600 hover:bg-indigo-500 text-white"
@@ -871,8 +1069,188 @@ export default function App() {
       }
   };
 
+  // --- Auth loading ---
+  const renderAuthLoadingView = () => (
+    <div data-testid="auth-loading" className="h-screen w-screen flex flex-col items-center justify-center gap-3 bg-slate-950 text-slate-400">
+      <Loader2 size={28} className="animate-spin text-indigo-500" />
+      <span className="text-sm">Comprobando sesión...</span>
+    </div>
+  );
+
+  // --- Login View ---
+  const renderLoginView = () => (
+    <div className="h-screen w-screen flex items-center justify-center bg-slate-950">
+      <div className="w-full max-w-md p-8 bg-slate-900 border border-slate-800 rounded-2xl shadow-2xl">
+        <div className="text-center mb-8">
+          <div className="bg-indigo-600 p-2 rounded-lg inline-block mb-4">
+            <NotebookTabs size={32} className="text-white" />
+          </div>
+          <h2 className="text-2xl font-bold text-white mb-2">Cerebro de Notas AI</h2>
+          <p className="text-slate-400">Inicia sesión para continuar</p>
+        </div>
+
+        <form
+          data-testid="login-form"
+          onSubmit={async (e) => {
+            e.preventDefault();
+            const form = e.target as HTMLFormElement;
+            const email = (form.elements.namedItem('email') as HTMLInputElement).value;
+            const password = (form.elements.namedItem('password') as HTMLInputElement).value;
+            try {
+              await login(email, password);
+            } catch (err) {
+              alert(err instanceof Error ? err.message : 'Error de autenticación');
+            }
+          }}
+          className="space-y-4"
+        >
+          <div>
+            <label className="block text-xs font-medium text-slate-400 mb-1">Correo electrónico</label>
+            <input
+              name="email"
+              type="email"
+              required
+              className="w-full px-3 py-2 bg-slate-800 border border-slate-700 rounded-lg text-white focus:outline-none focus:ring-2 focus:ring-indigo-500"
+              placeholder="usuario@ejemplo.com"
+            />
+          </div>
+          <div>
+            <label className="block text-xs font-medium text-slate-400 mb-1">Contraseña</label>
+            <input
+              name="password"
+              type="password"
+              required
+              className="w-full px-3 py-2 bg-slate-800 border border-slate-700 rounded-lg text-white focus:outline-none focus:ring-2 focus:ring-indigo-500"
+              placeholder="••••••••"
+            />
+          </div>
+          <button
+            type="submit"
+            className="w-full bg-indigo-600 hover:bg-indigo-500 text-white py-3 rounded-lg font-semibold transition-colors"
+          >
+            Iniciar sesión
+          </button>
+        </form>
+
+        <div className="mt-6 text-center text-xs text-slate-500">
+          ¿No tienes cuenta? <button
+            type="button"
+            onClick={() => navigate('/register')}
+            className="text-indigo-400 hover:underline ml-1"
+          >Regístrate aquí</button>
+        </div>
+      </div>
+    </div>
+  );
+
+  // --- Register View ---
+  const renderRegisterView = () => (
+    <div className="h-screen w-screen flex items-center justify-center bg-slate-950">
+      <div className="w-full max-w-md p-8 bg-slate-900 border border-slate-800 rounded-2xl shadow-2xl">
+        <div className="text-center mb-8">
+          <div className="bg-indigo-600 p-2 rounded-lg inline-block mb-4">
+            <NotebookTabs size={32} className="text-white" />
+          </div>
+          <h2 className="text-2xl font-bold text-white mb-2">Crear cuenta</h2>
+          <p className="text-slate-400">Regístrate para comenzar</p>
+        </div>
+
+        <form
+          data-testid="register-form"
+          onSubmit={async (e) => {
+            e.preventDefault();
+            const form = e.target as HTMLFormElement;
+            const email = (form.elements.namedItem('email') as HTMLInputElement).value;
+            const username = (form.elements.namedItem('username') as HTMLInputElement).value;
+            const password = (form.elements.namedItem('password') as HTMLInputElement).value;
+            const fullName = (form.elements.namedItem('fullName') as HTMLInputElement).value;
+            try {
+              const res = await fetch('/auth/register', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ email, username, password, full_name: fullName }),
+              });
+              if (!res.ok) {
+                const err = await res.json();
+                throw new Error(err.detail || 'Error al registrar');
+              }
+              await login(email, password);
+            } catch (err) {
+              alert(err instanceof Error ? err.message : 'Error al registrar');
+            }
+          }}
+          className="space-y-4"
+        >
+          <div>
+            <label className="block text-xs font-medium text-slate-400 mb-1">Correo electrónico</label>
+            <input
+              name="email"
+              type="email"
+              required
+              className="w-full px-3 py-2 bg-slate-800 border border-slate-700 rounded-lg text-white focus:outline-none focus:ring-2 focus:ring-indigo-500"
+              placeholder="usuario@ejemplo.com"
+            />
+          </div>
+          <div>
+            <label className="block text-xs font-medium text-slate-400 mb-1">Nombre de usuario</label>
+            <input
+              name="username"
+              type="text"
+              required
+              className="w-full px-3 py-2 bg-slate-800 border border-slate-700 rounded-lg text-white focus:outline-none focus:ring-2 focus:ring-indigo-500"
+              placeholder="miusuario"
+            />
+          </div>
+          <div>
+            <label className="block text-xs font-medium text-slate-400 mb-1">Contraseña</label>
+            <input
+              name="password"
+              type="password"
+              required
+              className="w-full px-3 py-2 bg-slate-800 border border-slate-700 rounded-lg text-white focus:outline-none focus:ring-2 focus:ring-indigo-500"
+              placeholder="••••••••"
+            />
+          </div>
+          <div>
+            <label className="block text-xs font-medium text-slate-400 mb-1">Nombre completo (opcional)</label>
+            <input
+              name="fullName"
+              type="text"
+              className="w-full px-3 py-2 bg-slate-800 border border-slate-700 rounded-lg text-white focus:outline-none focus:ring-2 focus:ring-indigo-500"
+              placeholder="Juan Pérez"
+            />
+          </div>
+          <button
+            type="submit"
+            className="w-full bg-indigo-600 hover:bg-indigo-500 text-white py-3 rounded-lg font-semibold transition-colors"
+          >
+            Crear cuenta
+          </button>
+        </form>
+
+        <div className="mt-6 pt-4 border-t border-slate-800 text-center text-xs text-slate-500">
+          ¿Ya tienes cuenta? <button
+            type="button"
+            onClick={() => navigate('/login')}
+            className="text-indigo-400 hover:underline ml-1"
+          >Inicia sesión</button>
+        </div>
+      </div>
+    </div>
+  );
+
+  // --- Main render ---
+  if (!authChecked) {
+    return renderAuthLoadingView();
+  }
+
+  if (!isAuthenticated) {
+    const isRegisterPath = pathname === '/register';
+    return isRegisterPath ? renderRegisterView() : renderLoginView();
+  }
+
   return (
-    <div className="h-screen w-screen flex bg-slate-950 overflow-hidden font-sans">
+    <div data-testid="app-shell" className="h-screen w-screen flex bg-slate-950 overflow-hidden font-sans">
 
       {/* Left Sidebar */}
       <aside className="w-64 bg-slate-900 border-r border-slate-800 flex flex-col p-4 shrink-0">
@@ -946,6 +1324,16 @@ export default function App() {
             <Sparkles size={14} />
             {aiOpen ? 'Cerrar Copiloto' : 'Invocar Copiloto AI'}
           </Button>
+          <div className="flex items-center gap-2 px-2 py-2 text-xs">
+            <User size={14} className="text-slate-400" />
+            <span className="text-slate-300 truncate">{currentUser?.username || currentUser?.email}</span>
+          </div>
+          <button
+            onClick={logout}
+            className="w-full text-left px-3 py-2 rounded-xl text-xs font-medium text-red-400 hover:bg-red-500/10 transition-colors flex items-center gap-2"
+          >
+            <X size={14} /> Cerrar sesión
+          </button>
         </div>
       </aside>
 

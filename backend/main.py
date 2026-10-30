@@ -3,7 +3,7 @@ import os
 import re
 import hashlib
 import requests
-from fastapi import FastAPI, Depends, HTTPException, status, Query, UploadFile, File, Form
+from fastapi import FastAPI, Depends, HTTPException, status, Query, UploadFile, File, Form, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
@@ -11,13 +11,26 @@ from typing import Optional
 from sqlalchemy.orm import Session
 from sqlalchemy import text, func, select
 
-from database import get_db, DocumentChunk, Document, ChatHistory, SessionLocal, UPLOAD_DIR, VAULT_DIR, get_file_paths, generate_file_hash
+from database import (
+    get_db, DocumentChunk, Document, ChatHistory, SessionLocal,
+    UPLOAD_DIR, VAULT_DIR, get_file_paths, generate_file_hash,
+    User, UserRole, Permission, DocumentShare, DocumentPermissionLevel,
+)
+from auth import (
+    verify_token, require_auth, get_current_user_from_cookie,
+    set_auth_cookies, set_access_cookie,
+)
+from fastapi.responses import Response
+import bcrypt
 
 app = FastAPI(title="Cerebro RAG - Gestión Unificada de Conocimiento")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=[
+        "http://localhost:5173",
+        "http://127.0.0.1:5173",
+    ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -39,6 +52,69 @@ class SearchRequest(BaseModel):
     types: list[str] = Field(default_factory=list)
     tags: list[str] = Field(default_factory=list)
     limit: int = 12
+
+
+class UserRegister(BaseModel):
+    email: str
+    username: str
+    password: str
+    full_name: str = ""
+
+
+class UserLogin(BaseModel):
+    email: str
+    password: str
+
+
+class UserOut(BaseModel):
+    id: int
+    email: str
+    username: str
+    full_name: str
+    is_admin: bool
+    role_name: Optional[str] = None
+
+    class Config:
+        from_attributes = True
+
+
+class TokenResponse(BaseModel):
+    access_token: str
+    refresh_token: str
+    token_type: str = "bearer"
+
+
+class DocumentShareOut(BaseModel):
+    id: int
+    user_id: int
+    username: str
+    permission_level: str
+
+    class Config:
+        from_attributes = True
+
+
+class DocumentShareCreate(BaseModel):
+    user_id: int
+    permission_level: DocumentPermissionLevel = DocumentPermissionLevel.READ
+
+
+class UserRoleOut(BaseModel):
+    id: int
+    name: str
+    description: str = ""
+
+    class Config:
+        from_attributes = True
+
+
+class PermissionOut(BaseModel):
+    id: int
+    name: str
+    description: str = ""
+
+    class Config:
+        from_attributes = True
 
 OLLAMA_URL = "http://localhost:11434/api/embeddings"
 OLLAMA_GENERATE_URL = "http://localhost:11434/api/generate"
@@ -94,7 +170,17 @@ def condense_query(history_context: str, current_question: str) -> str:
     except Exception:
         return current_question
 
-def _process_text(db: Session, filename: str, text_content: str, doc_type: str = "note", tags: list[str] = None, save_original: bool = True) -> int:
+def _assert_can_replace_document(db: Session, filename: str, user: User) -> None:
+    """Evita que un usuario sobrescriba el documento de otro con el mismo nombre."""
+    existing = db.query(Document).filter(Document.filename == filename).first()
+    if existing and not user.is_admin and existing.owner_id != user.id:
+        raise HTTPException(
+            status_code=403,
+            detail="Ya existe un documento con ese nombre y no tienes permisos para modificarlo",
+        )
+
+
+def _process_text(db: Session, filename: str, text_content: str, doc_type: str = "note", tags: list[str] = None, save_original: bool = True, owner_id: int = None, is_admin: bool = False) -> int:
     if tags is None:
         tags = []
     if not text_content.strip():
@@ -102,6 +188,11 @@ def _process_text(db: Session, filename: str, text_content: str, doc_type: str =
 
     existing = db.query(Document).filter(Document.filename == filename).first()
     if existing:
+        if not is_admin and existing.owner_id != owner_id:
+            raise HTTPException(
+                status_code=403,
+                detail="Ya existe un documento con ese nombre y no tienes permisos para modificarlo",
+            )
         if existing.file_path and os.path.exists(existing.file_path):
             os.remove(existing.file_path)
         db.delete(existing)
@@ -123,7 +214,8 @@ def _process_text(db: Session, filename: str, text_content: str, doc_type: str =
         file_hash=file_hash,
         original_filename=original_filename,
         tags=tags,
-        rag_enabled=True
+        rag_enabled=True,
+        owner_id=owner_id,
     )
     db.add(doc)
     db.commit()
@@ -192,14 +284,256 @@ def evaluate_rag(context: str, question: str, answer: str) -> dict:
 def health_check():
     return {"status": "ok", "connection": "Postgres + pgvector conectado"}
 
+
+# --- Authentication ---
+
+@app.post("/auth/register")
+def register(user_data: UserRegister, db: Session = Depends(get_db)):
+    email = user_data.email.strip().lower()
+    username = user_data.username.strip()
+    if len(user_data.password) < 8:
+        raise HTTPException(status_code=400, detail="La contraseña debe tener al menos 8 caracteres")
+    if db.query(User).filter(func.lower(User.email) == email).first():
+        raise HTTPException(status_code=400, detail="El email ya está registrado")
+    if db.query(User).filter(func.lower(User.username) == username.lower()).first():
+        raise HTTPException(status_code=400, detail="El nombre de usuario ya está registrado")
+
+    hashed = bcrypt.hashpw(user_data.password.encode("utf-8"), bcrypt.gensalt()).decode("utf-8")
+    user_role = db.query(UserRole).filter(UserRole.name == "user").first()
+    user = User(
+        email=email,
+        username=username,
+        password_hash=hashed,
+        full_name=user_data.full_name,
+        role_id=user_role.id if user_role else None,
+    )
+    db.add(user)
+    db.commit()
+    db.refresh(user)
+    return {"message": "Usuario registrado exitosamente", "user_id": user.id}
+
+
+@app.post("/auth/login")
+def login(user_data: UserLogin, response: Response, db: Session = Depends(get_db)):
+    email = user_data.email.strip().lower()
+    user = db.query(User).filter(func.lower(User.email) == email).first()
+    if not user or not bcrypt.checkpw(user_data.password.encode("utf-8"), user.password_hash.encode("utf-8")):
+        raise HTTPException(status_code=401, detail="Credenciales inválidas")
+    if not user.is_active:
+        raise HTTPException(status_code=401, detail="Usuario inactivo")
+
+    set_auth_cookies(response, user.id)
+    return {"message": "Autenticación exitosa"}
+
+
+@app.post("/auth/refresh")
+def refresh_token(request: Request, response: Response, db: Session = Depends(get_db)):
+    token = request.cookies.get("refresh_token")
+    if not token:
+        raise HTTPException(status_code=401, detail="Falta el token de refresco")
+
+    try:
+        payload = verify_token(token, expected_type="refresh")
+    except HTTPException:
+        raise HTTPException(status_code=401, detail="Token de refresco no válido")
+
+    user_id = int(payload["sub"])
+    user = db.query(User).filter(User.id == user_id, User.is_active == True).first()
+    if not user:
+        raise HTTPException(status_code=401, detail="Usuario no encontrado")
+
+    set_access_cookie(response, user.id)
+    return {"message": "Token renovado"}
+
+
+@app.post("/auth/logout")
+def logout(response: Response):
+    response.delete_cookie(key="access_token")
+    response.delete_cookie(key="refresh_token", path="/auth/refresh")
+    return {"message": "Sesión cerrada"}
+
+
+@app.get("/auth/me", response_model=UserOut)
+def me(request: Request, db: Session = Depends(get_db)):
+    user = require_auth(request)
+    role_name = user.role.name if user.role else None
+    return UserOut(
+        id=user.id, email=user.email, username=user.username,
+        full_name=user.full_name, is_admin=user.is_admin,
+        role_name=role_name,
+    )
+
+
+# --- User Management (Admin) ---
+
+@app.get("/admin/users", response_model=list[UserOut])
+def list_users(request: Request, db: Session = Depends(get_db)):
+    user = require_auth(request)
+    if not user.is_admin:
+        raise HTTPException(status_code=403, detail="Se requieren privilegios de administrador")
+    users = db.query(User).all()
+    return [
+        UserOut(
+            id=u.id, email=u.email, username=u.username,
+            full_name=u.full_name, is_admin=u.is_admin,
+            role_name=u.role.name if u.role else None,
+        )
+        for u in users
+    ]
+
+
+@app.get("/admin/roles", response_model=list[UserRoleOut])
+def list_roles(request: Request, db: Session = Depends(get_db)):
+    user = require_auth(request)
+    if not user.is_admin:
+        raise HTTPException(status_code=403, detail="Se requieren privilegios de administrador")
+    return db.query(UserRole).all()
+
+
+@app.get("/admin/permissions", response_model=list[PermissionOut])
+def list_permissions(request: Request, db: Session = Depends(get_db)):
+    user = require_auth(request)
+    if not user.is_admin:
+        raise HTTPException(status_code=403, detail="Se requieren privilegios de administrador")
+    return db.query(Permission).all()
+
+
+def get_accessible_documents(db: Session, user: User):
+    """Retorna documentos a los que el usuario tiene acceso (propietario, compartido, o admin)."""
+    if user.is_admin:
+        return db.query(Document)
+    shared_doc_ids = select(DocumentShare.document_id).where(
+        DocumentShare.user_id == user.id
+    )
+    return db.query(Document).filter(
+        (Document.owner_id == user.id) |
+        (Document.id.in_(shared_doc_ids))
+    )
+
+
+def check_document_access(db: Session, doc: Document, user: User, require_write: bool = False):
+    """Verifica que el usuario tenga acceso al documento. Si require_write, necesita WRITE o ADMIN."""
+    if user.is_admin:
+        return True
+    if doc.owner_id == user.id:
+        return True  # owner has full access
+    share = db_query_document_share(db, doc.id, user.id)
+    if share:
+        if not require_write:
+            return True
+        if share.permission_level not in (DocumentPermissionLevel.WRITE.value, DocumentPermissionLevel.ADMIN.value):
+            raise HTTPException(status_code=403, detail="No tienes permisos de escritura en este documento")
+        return True
+    raise HTTPException(status_code=403, detail="No tienes acceso a este documento")
+
+
+def check_document_owner(db: Session, doc: Document, user: User):
+    """Solo el propietario, un admin o un share ADMIN pueden borrar/gestionar."""
+    if user.is_admin or doc.owner_id == user.id:
+        return True
+    share = db_query_document_share(db, doc.id, user.id)
+    if share and share.permission_level == DocumentPermissionLevel.ADMIN.value:
+        return True
+    raise HTTPException(status_code=403, detail="Solo el propietario puede realizar esta acción")
+
+
+def db_query_document_share(db: Session, document_id: int, user_id: int):
+    return db.query(DocumentShare).filter(
+        DocumentShare.document_id == document_id,
+        DocumentShare.user_id == user_id,
+    ).first()
+
+
+# --- Document Sharing (ACL) ---
+
+@app.get("/api/documents/{filename}/shares", response_model=list[DocumentShareOut])
+def list_document_shares(filename: str, request: Request, db: Session = Depends(get_db)):
+    user = require_auth(request)
+    doc = db.query(Document).filter(Document.filename == filename).first()
+    if not doc:
+        raise HTTPException(status_code=404, detail="Documento no encontrado")
+    if not user.is_admin and doc.owner_id != user.id:
+        raise HTTPException(status_code=403, detail="No eres el propietario de este documento")
+    return [
+        DocumentShareOut(
+            id=s.id, user_id=s.user_id,
+            username=s.user.username if s.user else "",
+            permission_level=s.permission_level,
+        )
+        for s in doc.shares
+    ]
+
+
+@app.post("/api/documents/{filename}/shares")
+def share_document(
+    filename: str, share_data: DocumentShareCreate,
+    request: Request, db: Session = Depends(get_db),
+):
+    user = require_auth(request)
+    doc = db.query(Document).filter(Document.filename == filename).first()
+    if not doc:
+        raise HTTPException(status_code=404, detail="Documento no encontrado")
+    if not user.is_admin and doc.owner_id != user.id:
+        raise HTTPException(status_code=403, detail="No eres el propietario de este documento")
+
+    target_user = db.query(User).filter(User.id == share_data.user_id).first()
+    if not target_user:
+        raise HTTPException(status_code=404, detail="Usuario objetivo no encontrado")
+
+    existing = db.query(DocumentShare).filter(
+        DocumentShare.document_id == doc.id,
+        DocumentShare.user_id == share_data.user_id,
+    ).first()
+    if existing:
+        existing.permission_level = share_data.permission_level.value
+        db.commit()
+        db.refresh(existing)
+        return {"message": "Permiso actualizado"}
+
+    share = DocumentShare(
+        document_id=doc.id,
+        user_id=share_data.user_id,
+        permission_level=share_data.permission_level.value,
+        shared_by_id=user.id,
+    )
+    db.add(share)
+    db.commit()
+    db.refresh(share)
+    return {"message": "Documento compartido", "share_id": share.id}
+
+
+@app.delete("/api/documents/{filename}/shares/{user_id}")
+def remove_document_share(
+    filename: str, user_id: int,
+    request: Request, db: Session = Depends(get_db),
+):
+    user = require_auth(request)
+    doc = db.query(Document).filter(Document.filename == filename).first()
+    if not doc:
+        raise HTTPException(status_code=404, detail="Documento no encontrado")
+    if not user.is_admin and doc.owner_id != user.id:
+        raise HTTPException(status_code=403, detail="No eres el propietario de este documento")
+
+    share = db.query(DocumentShare).filter(
+        DocumentShare.document_id == doc.id,
+        DocumentShare.user_id == user_id,
+    ).first()
+    if not share:
+        raise HTTPException(status_code=404, detail="Compartimiento no encontrado")
+    db.delete(share)
+    db.commit()
+    return {"message": "Compartimiento eliminado"}
+
 @app.get("/api/documents")
 def list_documents(
     search: Optional[str] = None,
     type_filter: Optional[str] = None,
     tag_filter: Optional[str] = None,
+    request: Request = None,
     db: Session = Depends(get_db)
 ):
-    q = db.query(Document)
+    user = require_auth(request)
+    q = get_accessible_documents(db, user)
     if search:
         q = q.filter(Document.filename.like(f"%{search}%"))
     if type_filter:
@@ -227,8 +561,9 @@ def list_documents(
     return {"documents": documents}
 
 @app.get("/api/items")
-def list_knowledge_items(db: Session = Depends(get_db)):
-    docs = db.query(Document).order_by(Document.created_at.desc()).all()
+def list_knowledge_items(request: Request, db: Session = Depends(get_db)):
+    user = require_auth(request)
+    docs = get_accessible_documents(db, user).order_by(Document.created_at.desc()).all()
     items = []
     for doc in docs:
         items.append({
@@ -240,7 +575,8 @@ def list_knowledge_items(db: Session = Depends(get_db)):
     return items
 
 @app.post("/api/ingest")
-def ingest_item(payload: IngestRequest, db: Session = Depends(get_db)):
+def ingest_item(payload: IngestRequest, request: Request, db: Session = Depends(get_db)):
+    user = require_auth(request)
     filename = payload.filename
     if payload.type == "note" and not filename.endswith('.md'):
         if filename.endswith('.txt'):
@@ -249,14 +585,16 @@ def ingest_item(payload: IngestRequest, db: Session = Depends(get_db)):
             filename = filename.rsplit('.', 1)[0] + '.md'
         else:
             filename = filename + '.md'
-    chunk_count = _process_text(db, filename, payload.text, payload.type, payload.tags)
+    chunk_count = _process_text(db, filename, payload.text, payload.type, payload.tags, owner_id=user.id, is_admin=user.is_admin)
     return {"status": "success", "message": f"'{filename}' guardado e indexado.", "chunks": chunk_count}
 
 @app.delete("/api/documents/{filename}")
-def delete_document(filename: str, db: Session = Depends(get_db)):
+def delete_document(filename: str, request: Request, db: Session = Depends(get_db)):
+    user = require_auth(request)
     doc = db.query(Document).filter(Document.filename == filename).first()
     if not doc:
         raise HTTPException(status_code=404, detail="Documento no encontrado.")
+    check_document_owner(db, doc, user)
     if doc.file_path and os.path.exists(doc.file_path):
         os.remove(doc.file_path)
     db.delete(doc)
@@ -264,30 +602,36 @@ def delete_document(filename: str, db: Session = Depends(get_db)):
     return {"status": "success", "message": f"'{filename}' eliminado."}
 
 @app.patch("/api/documents/{filename}/toggle-rag")
-def toggle_rag(filename: str, db: Session = Depends(get_db)):
+def toggle_rag(filename: str, request: Request, db: Session = Depends(get_db)):
+    user = require_auth(request)
     doc = db.query(Document).filter(Document.filename == filename).first()
     if not doc:
         raise HTTPException(status_code=404, detail="Documento no encontrado.")
+    check_document_access(db, doc, user, require_write=True)
     doc.rag_enabled = not doc.rag_enabled
     db.query(DocumentChunk).filter(DocumentChunk.document_id == doc.id).update({"rag_enabled": doc.rag_enabled})
     db.commit()
     return {"status": "success", "message": "Estado RAG alternado.", "rag_enabled": doc.rag_enabled}
 
 @app.patch("/api/documents/{filename}/tags")
-def update_tags(filename: str, tags: list[str], db: Session = Depends(get_db)):
+def update_tags(filename: str, tags: list[str], request: Request, db: Session = Depends(get_db)):
+    user = require_auth(request)
     doc = db.query(Document).filter(Document.filename == filename).first()
     if not doc:
         raise HTTPException(status_code=404, detail="Documento no encontrado.")
+    check_document_access(db, doc, user, require_write=True)
     doc.tags = tags
     db.query(DocumentChunk).filter(DocumentChunk.document_id == doc.id).update({"tags": tags})
     db.commit()
     return {"status": "success", "message": "Tags actualizados.", "tags": tags}
 
 @app.get("/api/documents/{filename}")
-def get_document(filename: str, db: Session = Depends(get_db)):
+def get_document(filename: str, request: Request, db: Session = Depends(get_db)):
+    user = require_auth(request)
     doc = db.query(Document).filter(Document.filename == filename).first()
     if not doc:
         raise HTTPException(status_code=404, detail="Documento no encontrado.")
+    check_document_access(db, doc, user)
     content = ""
     if doc.file_path and os.path.exists(doc.file_path):
         with open(doc.file_path, 'r', encoding='utf-8') as f:
@@ -307,20 +651,24 @@ def get_document(filename: str, db: Session = Depends(get_db)):
     }
 
 @app.get("/api/documents/{filename}/download")
-def download_document(filename: str, db: Session = Depends(get_db)):
+def download_document(filename: str, request: Request, db: Session = Depends(get_db)):
+    user = require_auth(request)
     doc = db.query(Document).filter(Document.filename == filename).first()
     if not doc:
         raise HTTPException(status_code=404, detail="Documento no encontrado.")
+    check_document_access(db, doc, user)
     if not doc.file_path or not os.path.exists(doc.file_path):
         raise HTTPException(status_code=404, detail="Archivo original no encontrado.")
     from fastapi.responses import FileResponse
     return FileResponse(doc.file_path, filename=doc.original_filename or doc.filename)
 
 @app.get("/api/documents/{filename}/content")
-def get_document_content(filename: str, db: Session = Depends(get_db)):
+def get_document_content(filename: str, request: Request, db: Session = Depends(get_db)):
+    user = require_auth(request)
     doc = db.query(Document).filter(Document.filename == filename).first()
     if not doc:
         raise HTTPException(status_code=404, detail="Documento no encontrado.")
+    check_document_access(db, doc, user)
     content = ""
     if doc.file_path and os.path.exists(doc.file_path):
         with open(doc.file_path, 'r', encoding='utf-8') as f:
@@ -333,8 +681,10 @@ def ingest_file(
     filename: str = Form(...),
     item_type: str = Form("document"),
     tags: str = Form(""),
+    request: Request = None,
     db: Session = Depends(get_db)
 ):
+    user = require_auth(request)
     import pypdf
     import io
     import pytesseract
@@ -373,22 +723,30 @@ def ingest_file(
 
     tag_list = [t.strip() for t in tags.split(',') if t.strip()] if tags else []
 
-    hashed_path, file_hash, saved_ext = get_file_paths(filename, contents, is_note=False)
-    with open(hashed_path, 'wb') as f:
-        f.write(contents)
+    _assert_can_replace_document(db, filename, user)
 
-    chunk_count = _process_text(db, filename, text_content, item_type, tag_list, save_original=False)
+    hashed_path, file_hash, saved_ext = get_file_paths(filename, contents, is_note=False)
+
+    chunk_count = _process_text(db, filename, text_content, item_type, tag_list, save_original=False, owner_id=user.id, is_admin=user.is_admin)
     doc = db.query(Document).filter(Document.filename == filename).first()
     if doc:
+        with open(hashed_path, 'wb') as f:
+            f.write(contents)
         doc.file_path = hashed_path
+        doc.owner_id = user.id
         doc.file_hash = file_hash
         doc.original_filename = filename
         db.commit()
     return {"status": "success", "message": f"'{filename}' guardado e indexado.", "chunks": chunk_count}
 
 @app.get("/api/tags")
-def list_tags(db: Session = Depends(get_db)):
-    rows = db.query(DocumentChunk.tags).distinct().all()
+def list_tags(request: Request, db: Session = Depends(get_db)):
+    user = require_auth(request)
+    accessible_docs = get_accessible_documents(db, user).all()
+    accessible_ids = [d.id for d in accessible_docs]
+    if not accessible_ids:
+        return {"tags": []}
+    rows = db.query(DocumentChunk.tags).filter(DocumentChunk.document_id.in_(accessible_ids)).distinct().all()
     all_tags = set()
     for r in rows:
         if r[0]:
@@ -396,11 +754,17 @@ def list_tags(db: Session = Depends(get_db)):
     return {"tags": sorted(all_tags)}
 
 @app.post("/api/search")
-def hybrid_search(payload: SearchRequest, db: Session = Depends(get_db)):
+def hybrid_search(payload: SearchRequest, request: Request, db: Session = Depends(get_db)):
     """
     Búsqueda híbrida con filtros.
     search_mode: 'hybrid' (vector + FTS), 'semantic' (vector only), 'exact' (FTS only)
     """
+    user = require_auth(request)
+    accessible_docs = get_accessible_documents(db, user).all()
+    accessible_ids = [d.id for d in accessible_docs]
+    if not accessible_ids:
+        return {"results": [], "sources": []}
+
     query_text = payload.query.strip()
     if not query_text:
         return {"results": [], "sources": []}
@@ -418,7 +782,8 @@ def hybrid_search(payload: SearchRequest, db: Session = Depends(get_db)):
     if search_mode in ("hybrid", "semantic"):
         question_vector = get_ollama_embedding(query_text_for_search)
         vector_results = db.query(DocumentChunk).filter(
-            DocumentChunk.rag_enabled == True
+            DocumentChunk.rag_enabled == True,
+            DocumentChunk.document_id.in_(accessible_ids)
         ).order_by(
             DocumentChunk.embedding.cosine_distance(question_vector)
         ).limit(10).all()
@@ -429,8 +794,10 @@ def hybrid_search(payload: SearchRequest, db: Session = Depends(get_db)):
         if fts_query:
             text_results = db.query(DocumentChunk).filter(
                 text("search_vector @@ to_tsquery('pg_catalog.spanish', :query)")
-                .bindparams(query=fts_query)
-            ).filter(DocumentChunk.rag_enabled == True).limit(10).all()
+                .bindparams(query=fts_query),
+                DocumentChunk.rag_enabled == True,
+                DocumentChunk.document_id.in_(accessible_ids)
+            ).limit(10).all()
 
     if payload.types:
         type_filter = payload.types
@@ -462,7 +829,8 @@ def hybrid_search(payload: SearchRequest, db: Session = Depends(get_db)):
 # --- CHAT & RAG QUERY ---
 
 @app.post("/api/query")
-def query_rag(payload: QueryRequest, db: Session = Depends(get_db)):
+def query_rag(payload: QueryRequest, request: Request, db: Session = Depends(get_db)):
+    user = require_auth(request)
     if not payload.question.strip():
         raise HTTPException(status_code=400, detail="La pregunta está vacía.")
 
@@ -475,9 +843,18 @@ def query_rag(payload: QueryRequest, db: Session = Depends(get_db)):
 
     search_query = condense_query(history_context, payload.question)
 
+    accessible_docs = get_accessible_documents(db, user).all()
+    accessible_ids = [d.id for d in accessible_docs]
+    if not accessible_ids:
+        return StreamingResponse(
+            iter([f"event: token\ndata: {json.dumps({'token': 'No tienes documentos accesibles para hacer consultas.'})}\n\n"]),
+            media_type="text/event-stream"
+        )
+
     question_vector = get_ollama_embedding(search_query)
     vector_results = db.query(DocumentChunk).filter(
-        DocumentChunk.rag_enabled == True
+        DocumentChunk.rag_enabled == True,
+        DocumentChunk.document_id.in_(accessible_ids)
     ).order_by(
         DocumentChunk.embedding.cosine_distance(question_vector)
     ).limit(8).all()
@@ -485,8 +862,10 @@ def query_rag(payload: QueryRequest, db: Session = Depends(get_db)):
     words = [w for w in search_query.replace("?", "").split() if len(w) > 2]
     fts_query = " & ".join(words) if words else search_query
     text_results = db.query(DocumentChunk).filter(
-        text("search_vector @@ to_tsquery('pg_catalog.spanish', :query)").bindparams(query=fts_query)
-    ).filter(DocumentChunk.rag_enabled == True).limit(8).all() if fts_query else []
+        text("search_vector @@ to_tsquery('pg_catalog.spanish', :query)").bindparams(query=fts_query),
+        DocumentChunk.rag_enabled == True,
+        DocumentChunk.document_id.in_(accessible_ids)
+    ).limit(8).all() if fts_query else []
 
     rrf_scores = {}
     k = 60

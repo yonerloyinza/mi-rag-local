@@ -1,0 +1,159 @@
+### ============================================================================
+# Pruebas de API - Mi-RAG Local
+# Base URL: http://localhost:5173 (frontend con proxy Vite) o http://127.0.0.1:8000 (backend directo)
+# ============================================================================
+
+### Health Check
+GET http://localhost:5173/api/health
+
+### ============================================================================
+# AUTENTICACIÓN
+# ============================================================================
+
+### Registrar usuario (POST)
+POST http://localhost:5173/auth/register
+Content-Type: application/json
+
+{
+  "email": "yonerloy@gmail.com",
+  "username": "yonerloy",
+  "password": "xCespedes01*",
+  "full_name": "Yonerloy Inza Lorenzo"
+}
+
+### Login (POST) - devuelve cookies HttpOnly
+POST http://localhost:5173/auth/login
+Content-Type: application/json
+
+{
+  "email": "yonerloy@gmail.com",
+  "password": "xCespedes01*"
+}
+
+### Verificar sesión actual (GET) - requiere cookie de sesión
+GET http://localhost:5173/auth/me
+
+### Renovar Access Token (POST)
+POST http://localhost:5173/auth/refresh
+
+### Logout (POST)
+POST http://localhost:5173/auth/logout
+
+### ============================================================================
+# DOCUMENTOS
+# ============================================================================
+
+### Listar documentos (GET) - requiere autenticación
+GET http://localhost:5173/api/documents
+
+### Ingerir texto como nota (POST) - requiere autenticación
+POST http://localhost:5173/api/ingest
+Content-Type: application/json
+
+{
+  "filename": "mi_nota.md",
+  "text": "Este es el contenido de una nota de prueba para el sistema RAG local.",
+  "type": "note",
+  "tags": ["prueba", "nota"]
+}
+
+### Ingerir archivo subido (POST multipart) - requiere autenticación
+# Nota: este endpoint se prueba desde el frontend, no desde request.http directamente
+# POST http://localhost:5173/api/ingest-file
+# Content-Type: multipart/form-data
+
+### Obtener documento por filename (GET) - requiere autenticación
+GET http://localhost:5173/api/documents/mi_nota.md
+
+### Descargar documento (GET) - requiere autenticación
+GET http://localhost:5173/api/documents/mi_nota.md/download
+
+### Obtener contenido de documento (GET) - requiere autenticación
+GET http://localhost:5173/api/documents/mi_nota.md/content
+
+### Toggle RAG habilitado/deshabilitado (PATCH) - requiere autenticación
+PATCH http://localhost:5173/api/documents/mi_nota.md/toggle-rag
+
+### Actualizar tags de documento (PATCH) - requiere autenticación
+PATCH http://localhost:5173/api/documents/mi_nota.md/tags
+Content-Type: application/json
+
+["prueba", "nota", "actualizado"]
+
+### Eliminar documento (DELETE) - requiere autenticación
+DELETE http://localhost:5173/api/documents/mi_nota.md
+
+### ============================================================================
+# COMPARTIMIENTO DE DOCUMENTOS (ACL)
+# ============================================================================
+
+### Listar shares de un documento (GET) - requiere ser propietario
+GET http://localhost:5173/api/documents/mi_nota.md/shares
+
+### Compartir documento con otro usuario (POST) - requiere ser propietario
+POST http://localhost:5173/api/documents/mi_nota.md/shares
+Content-Type: application/json
+
+{
+  "user_id": 2,
+  "permission_level": "read"
+}
+
+### Eliminar compartir documento (DELETE) - requiere ser propietario
+DELETE http://localhost:5173/api/documents/mi_nota.md/shares/2
+
+### ============================================================================
+# BÚSQUEDA
+# ============================================================================
+
+### Búsqueda híbrida (POST) - requiere autenticación
+POST http://localhost:5173/api/search
+Content-Type: application/json
+
+{
+  "query": "texto de prueba",
+  "search_mode": "hybrid",
+  "types": [],
+  "tags": [],
+  "limit": 12
+}
+
+### ============================================================================
+# QUERY RAG (Chat)
+# ============================================================================
+
+### Consulta RAG con streaming SSE (POST) - requiere autenticación
+POST http://localhost:5173/api/query
+Content-Type: application/json
+
+{
+  "question": "¿De qué trata el documento de prueba?",
+  "session_id": "session_123"
+}
+
+### ============================================================================
+# TAGS
+# ============================================================================
+
+### Listar tags disponibles (GET) - requiere autenticación
+GET http://localhost:5173/api/tags
+
+### ============================================================================
+# ITEMS (Knowledge items para el dashboard)
+# ============================================================================
+
+### Listar items de conocimiento (GET) - requiere autenticación
+GET http://localhost:5173/api/items
+
+### ============================================================================
+# USUARIOS (solo admin)
+# ============================================================================
+
+### Listar usuarios (GET) - requiere admin
+GET http://localhost:5173/admin/users
+
+### Listar roles (GET) - requiere admin
+GET http://localhost:5173/admin/roles
+
+### Listar permisos (GET) - requiere admin
+GET http://localhost:5173/admin/permissions

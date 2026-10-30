@@ -1,6 +1,47 @@
 # API Endpoints
 
-All endpoints prefixed with `/api`. CORS allows all origins.
+All endpoints prefixed with `/api` require an authenticated session (HttpOnly cookies). Authentication endpoints live under `/auth`. CORS only allows the local Vite origins (`http://localhost:5173` and `http://127.0.0.1:5173`).
+
+## Autenticación
+
+Las cookies son `HttpOnly` + `SameSite=Lax`. El access token dura 15 minutos y el refresh token 7 días por defecto.
+
+### POST `/auth/register`
+Crea una cuenta. Email y username son únicos (sin distinguir mayúsculas).
+
+**Body** (JSON):
+```json
+{
+  "email": "usuario@ejemplo.com",
+  "username": "usuario",
+  "password": "contraseña-de-8-o-más",
+  "full_name": "Nombre opcional"
+}
+```
+
+**Response**: `{"message": "Usuario registrado exitosamente", "user_id": 1}`
+**Error 400**: email/username duplicado o contraseña de menos de 8 caracteres.
+
+### POST `/auth/login`
+Valida credenciales y adjunta `access_token` y `refresh_token` como cookies.
+
+**Body** (JSON): `{"email": "...", "password": "..."}`
+**Response**: `{"message": "Autenticación exitosa"}`
+**Error 401**: credenciales inválidas o usuario inactivo.
+
+### POST `/auth/refresh`
+Renueva el access token usando la cookie `refresh_token` (path `/auth/refresh`).
+
+**Response**: `{"message": "Token renovado"}`
+
+### POST `/auth/logout`
+Elimina ambas cookies de autenticación.
+
+### GET `/auth/me`
+Devuelve el usuario autenticado: `id`, `email`, `username`, `full_name`, `is_admin`, `role_name`.
+
+### GET `/admin/users` · `/admin/roles` · `/admin/permissions`
+Requieren `is_admin=true`. Un usuario normal recibe **403**.
 
 ## Ingesta
 
@@ -118,3 +159,25 @@ Update tags: `["tag1", "tag2"]`.
 
 ### PATCH `/api/documents/{filename}/toggle-rag`
 Toggle `rag_enabled` boolean.
+
+## Compartir documentos (ACL)
+
+Un documento pertenece a quien lo creó. El propietario puede compartirlo con otros usuarios con nivel `read`, `write` o `admin`.
+
+### GET `/api/documents/{filename}/shares`
+Lista los shares del documento. Solo propietario o admin global.
+
+### POST `/api/documents/{filename}/shares`
+**Body**: `{"user_id": 2, "permission_level": "read"}`
+Crea o actualiza un share. Solo propietario o admin global.
+
+### DELETE `/api/documents/{filename}/shares/{user_id}`
+Elimina un share. Solo propietario o admin global.
+
+### Reglas de autorización
+- Sin sesión: **401**.
+- Documento ajeno sin share: **403**.
+- Share `read`: puede ver listado, contenido y descargar.
+- Share `write`: además puede alternar RAG y editar tags.
+- Solo propietario, admin global o share `admin` puede eliminar o gestionar shares.
+
