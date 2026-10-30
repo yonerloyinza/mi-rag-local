@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useRef, useLayoutEffect } from 'react';
+import { toast } from 'sonner';
 import {
    Folder, FileText, Database, Bot, User, Loader2, CheckCircle2, Plus,
    Sparkles, Send, Layers, NotebookTabs, Trash2, MessageSquare,
@@ -501,14 +502,14 @@ export default function App() {
   // --- Modal "Nueva Data" ---
   const handleDataSubmit = async () => {
     if (!dataTitle.trim()) {
-      alert('El título es requerido');
+      toast('El título es requerido');
       return;
     }
     setIngestLoading(true);
     try {
       if (dataMode === 'note') {
         if (!dataContent.trim()) {
-          alert('El contenido es requerido');
+          toast('El contenido es requerido');
           return;
         }
         const res = await authFetch(`${API_BASE}/ingest`, {
@@ -523,13 +524,13 @@ export default function App() {
         });
         const data = await res.json();
         if (res.ok) {
-          alert(`Nota guardada e indexada (${data.chunks} fragmentos).`);
+          toast(`Nota guardada e indexada (${data.chunks} fragmentos.)`);
         } else {
-          alert(`Error: ${data.detail || 'Unknown error'}`);
+          toast.error(`Error: ${data.detail || 'Unknown error'}`);
         }
       } else {
         if (!dataFile) {
-          alert('Selecciona un archivo');
+          toast('Selecciona un archivo');
           return;
         }
         const formData = new FormData();
@@ -547,9 +548,9 @@ export default function App() {
           const typeLabel = ['png', 'jpg', 'jpeg', 'gif', 'webp'].includes(ext || '') ? 'imagen' :
                             ['pdf'].includes(ext || '') ? 'PDF' :
                             ['md'].includes(ext || '') ? 'markdown' : 'archivo';
-          alert(`${typeLabel.charAt(0).toUpperCase() + typeLabel.slice(1)} cargado e indexado (${data.chunks} fragmentos).`);
+          toast(`${typeLabel.charAt(0).toUpperCase() + typeLabel.slice(1)} cargado e indexado (${data.chunks} fragmentos.)`);
         } else {
-          alert(`Error: ${data.detail || 'Unknown error'}`);
+          toast.error(`Error: ${data.detail || 'Unknown error'}`);
         }
       }
       setDataModalOpen(false);
@@ -562,7 +563,8 @@ export default function App() {
       authFetchDocuments();
       setView('dashboard');
     } catch {
-      alert("Error al conectar con el backend.");
+      toast("Error al conectar con el backend.");
+      setDataModalOpen(false);
     } finally {
       setIngestLoading(false);
     }
@@ -1099,7 +1101,7 @@ export default function App() {
             try {
               await login(email, password);
             } catch (err) {
-              alert(err instanceof Error ? err.message : 'Error de autenticación');
+              toast(err instanceof Error ? err.message : 'Error de autenticación');
             }
           }}
           className="space-y-4"
@@ -1176,7 +1178,7 @@ export default function App() {
               }
               await login(email, password);
             } catch (err) {
-              alert(err instanceof Error ? err.message : 'Error al registrar');
+              toast(err instanceof Error ? err.message : 'Error al registrar');
             }
           }}
           className="space-y-4"
